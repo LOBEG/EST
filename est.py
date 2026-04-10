@@ -460,7 +460,7 @@ class SMTPTestServer:
             try:
                 socket.gethostbyname(mx)
                 working_fallbacks.append(mx)
-            except:
+            except Exception:
                 continue
         
         return working_fallbacks
@@ -697,36 +697,39 @@ class EST:
             with open(self.config.log_file, 'r') as f:
                 log_lines = f.readlines()
             
-            recent_logs = log_lines[-lines:] if len(log_lines) > lines else log_lines
-            
-            for line in recent_logs:
+            # Parse only valid JSON entries (skip logging handler text lines)
+            json_entries = []
+            for line in log_lines:
                 try:
-                    entry = json.loads(line.strip())
-                    timestamp = entry['timestamp'][:19].replace('T', ' ')
-                    
-                    status = "✅ SUCCESS" if entry['success'] else "❌ FAILED"
-                    test_type = entry['test_type'].replace('_', ' ').title()
-                    
-                    print(f"📅 {timestamp} | {status}")
-                    print(f"🎯 Test: {test_type} - {entry['scenario']}")
-                    print(f"📤 From: {entry['from_email']}")
-                    print(f"📥 Target: {entry['target']}")
-                    
-                    if 'details' in entry and entry['details']:
-                        details = entry['details']
-                        if 'category' in details:
-                            print(f"🏷️  Category: {details['category']}")
-                        if 'severity' in details:
-                            print(f"⚠️  Severity: {details['severity']}")
-                        if 'error' in details:
-                            print(f"❌ Error: {details['error']}")
-                    
-                    print("─" * 80)
-                    
+                    json_entries.append(json.loads(line.strip()))
                 except json.JSONDecodeError:
                     continue
             
-            print(f"📈 Total log entries: {len(log_lines)}")
+            recent_entries = json_entries[-lines:] if len(json_entries) > lines else json_entries
+            
+            for entry in recent_entries:
+                timestamp = entry['timestamp'][:19].replace('T', ' ')
+                
+                status = "✅ SUCCESS" if entry['success'] else "❌ FAILED"
+                test_type = entry['test_type'].replace('_', ' ').title()
+                
+                print(f"📅 {timestamp} | {status}")
+                print(f"🎯 Test: {test_type} - {entry['scenario']}")
+                print(f"📤 From: {entry['from_email']}")
+                print(f"📥 Target: {entry['target']}")
+                
+                if 'details' in entry and entry['details']:
+                    details = entry['details']
+                    if 'category' in details:
+                        print(f"🏷️  Category: {details['category']}")
+                    if 'severity' in details:
+                        print(f"⚠️  Severity: {details['severity']}")
+                    if 'error' in details:
+                        print(f"❌ Error: {details['error']}")
+                
+                print("─" * 80)
+            
+            print(f"📈 Total log entries: {len(json_entries)}")
             print(f"📁 Full log file: {self.config.log_file}")
             
         except Exception as e:
@@ -741,9 +744,17 @@ class EST:
         print("📊 Generating EST Security Assessment Report...")
         
         try:
-            # Read all log entries
+            # Read all log entries (skip non-JSON lines from logging handler)
+            log_entries = []
             with open(self.config.log_file, 'r') as f:
-                log_entries = [json.loads(line.strip()) for line in f if line.strip()]
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        log_entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
             
             if not log_entries:
                 print("❌ No test data found in logs")
@@ -1120,7 +1131,7 @@ Author: {__author__} | License: {__license__}
     
     if args.command == 'server':
         # Check port permissions
-        if args.port <= 1024 and os.geteuid() != 0:
+        if args.port <= 1024 and hasattr(os, 'geteuid') and os.geteuid() != 0:
             print(f"❌ Port {args.port} requires root privileges!")
             print(f"💡 Solutions:")
             print(f"   1. Run as root: sudo est server --port {args.port}")
