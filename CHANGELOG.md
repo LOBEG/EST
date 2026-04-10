@@ -17,6 +17,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Planned: Improved error handling and user feedback
 - Planned: Enhanced logging with structured output
 
+## [3.0.0] - 2026-04-10
+
+### Added
+- **File Attachments** - Attach PDF, HTML, or any file type to spoofed emails (`--attachment`)
+- **HTML Email Body** - Send raw HTML as the email body (`--html-body`) or load from a file (`--body-file`)
+- **Reply-To Header** - Set a custom Reply-To address to redirect replies (`--reply-to`)
+- **Email Threading** - Inject emails into existing conversation threads (`--in-reply-to`, `--references`)
+- **Bulk / Multi-Target Sending** - Comma-separated targets or load from a file (`--target-list`)
+- **Send Throttling** - Configurable delay between sends for bulk campaigns (`--delay`)
+- **DNS Validation** - Automatic SPF, DKIM, and DMARC checking before sending for deliverability assessment
+- **`dns-check` CLI command** - Standalone DNS record validation from the command line
+- **`bulk` CLI command** - Dedicated bulk send mode with scenario or custom options
+- **Unified email builder** - Single `_build_email_message()` method handles all message construction
+- **DNSValidator class** - Reusable DNS validation with detailed reporting
+
+### Changed
+- **Author updated** from "Tech Sky - SRT" to "paris"
+- **Version bumped** to 3.0.0
+- `test` and `custom` commands now support all new features (attachments, HTML, reply-to, threading, bulk targets, throttling, DNS validation)
+- Target argument in `test` command is now optional (can use `--target-list` instead)
+- Banner dynamically formats author/license fields
+
+### Removed
+- Legacy `_create_mime_email`, `_create_custom_mime_email`, `_create_simple_email`, `_create_simple_custom_email` methods replaced by unified builder
+
 ## [2.0.0] - 2025-06-12
 
 ### Added

@@ -4,7 +4,7 @@
 
 ![EST Logo](https://img.shields.io/badge/EST-Email%20Spoofing%20Tool-red?style=for-the-badge&logo=security&logoColor=white)
 
-[![Version](https://img.shields.io/badge/version-2.0.1-blue.svg)](https://github.com/techsky-eh/EST)
+[![Version](https://img.shields.io/badge/version-3.0.0-blue.svg)](https://github.com/techsky-eh/EST)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8+-yellow.svg)](https://python.org)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](https://github.com/techsky-eh/EST)
@@ -30,6 +30,13 @@ EST (Email Spoofing Tool) is a comprehensive, professional-grade framework desig
 - **Professional SMTP Server** - Multi-threaded, RFC-compliant SMTP server for testing
 - **Pre-built Attack Scenarios** - 5 realistic email spoofing scenarios covering common attack vectors
 - **Custom Test Creation** - Build and execute custom spoofing tests with full control
+- **File Attachments** - Attach PDF, HTML, or any file to spoofed emails
+- **HTML Email Body** - Send raw HTML content as the email body or load from file
+- **Reply-To Spoofing** - Set a custom Reply-To header to redirect replies
+- **Email Threading** - Inject emails into existing threads using In-Reply-To and References headers
+- **Bulk / Multi-Target Sending** - Send to comma-separated targets, or load from a file
+- **Send Throttling** - Rate-limit bulk sends with configurable delays between emails
+- **DNS Validation** - Check SPF, DKIM, and DMARC records for sender domains before spoofing
 - **Comprehensive Logging** - Detailed audit trails for all security tests
 - **Assessment Reporting** - Generate professional security assessment reports
 - **Real-time Email Relay** - Automatic delivery to real email destinations for testing
@@ -51,6 +58,9 @@ EST (Email Spoofing Tool) is a comprehensive, professional-grade framework desig
 EST Framework
 ├── SMTP Testing Server (Multi-threaded)
 ├── Scenario Engine (Pre-built + Custom)
+├── Unified Email Builder (Attachments, HTML, Threading)
+├── Bulk Sending Engine (Multi-target + Throttling)
+├── DNS Validator (SPF / DKIM / DMARC)
 ├── Email Relay System (MX Resolution)
 ├── Audit & Logging System
 ├── Report Generation Engine
@@ -125,12 +135,24 @@ est list
 # Execute CEO fraud scenario
 est test 1 target@company.com
 
-# Run custom spoofing test
+# Run custom spoofing test with attachments, HTML body, and reply-to
 est custom --from-email "ceo@company.com" \
            --from-name "John Smith, CEO" \
            --subject "Urgent Request" \
            --body "Please handle this immediately" \
-           --target "employee@company.com"
+           --target "employee@company.com" \
+           --reply-to "attacker@evil.com" \
+           --attachment /path/to/report.pdf \
+           --html-body "<h1>Urgent!</h1><p>See attached.</p>"
+
+# Send to multiple targets with throttling
+est test 1 "a@company.com,b@company.com,c@company.com" --delay 2
+
+# Bulk send from a target list file
+est bulk --scenario 1 --target-list targets.txt --delay 1.5
+
+# Check DNS records for a sender domain before spoofing
+est dns-check ceo@targetcompany.com
 
 # View test logs
 est logs --lines 50
@@ -166,12 +188,60 @@ est test <scenario_id> <target_email>
 # Execute with custom SMTP server
 est test 1 target@company.com --smtp-host mail.company.com --smtp-port 25
 
-# Custom spoofing test
+# Scenario with reply-to, attachment, and HTML
+est test 1 target@company.com \
+    --reply-to real@attacker.com \
+    --attachment invoice.pdf \
+    --body-file email_template.html
+
+# Custom spoofing test (all features)
 est custom --from-email <sender> \
            --from-name <display_name> \
            --subject <subject> \
            --body <message_body> \
-           --target <target_email>
+           --target <target_email> \
+           --reply-to <reply_address> \
+           --attachment <file_path> \
+           --html-body "<h1>HTML content</h1>" \
+           --in-reply-to "<original-message-id>" \
+           --references "<thread-message-ids>"
+```
+
+#### Bulk / Multi-Target Sending
+```bash
+# Comma-separated targets with throttling
+est test 1 "user1@x.com,user2@x.com,user3@x.com" --delay 2
+
+# Bulk from file (one email per line) with scenario
+est bulk --scenario 1 --target-list targets.txt --delay 1
+
+# Bulk custom send from file
+est bulk --from-email "ceo@company.com" \
+         --from-name "CEO" \
+         --subject "Urgent" \
+         --body "Please act now" \
+         --target-list targets.txt \
+         --delay 1.5 \
+         --reply-to "real@attacker.com"
+
+# Target list can also be used with test/custom commands
+est custom --from-email "hr@company.com" \
+           --from-name "HR" \
+           --subject "Benefits Update" \
+           --body "Click the link" \
+           --target "" \
+           --target-list employees.txt \
+           --delay 0.5
+```
+
+#### DNS Validation
+```bash
+# Check SPF/DKIM/DMARC for a sender domain
+est dns-check ceo@targetcompany.com
+est dns-check targetcompany.com
+
+# Disable DNS check on send (when you know the domain config)
+est test 1 target@company.com --no-dns-check
 ```
 
 #### Monitoring & Reporting
@@ -195,7 +265,7 @@ EST stores configuration in `~/.est/config.json`:
 
 ```json
 {
-  "version": "2.0.1",
+  "version": "3.0.0",
   "smtp_server": {
     "host": "0.0.0.0",
     "port": 2525,
@@ -224,42 +294,69 @@ EST stores configuration in `~/.est/config.json`:
 
 ### Professional Assessment Workflow
 
-1. **Environment Setup**
+1. **DNS Reconnaissance**
+   ```bash
+   # Check target domain DNS records first
+   est dns-check ceo@target-company.com
+   ```
+
+2. **Environment Setup**
    ```bash
    # Start EST server in isolated environment
    est server --port 2525
    ```
 
-2. **Baseline Testing**
+3. **Baseline Testing**
    ```bash
    # Test with temporary email addresses first
    est test 1 test@guerrillamail.com
    est test 2 test@mailinator.com
    ```
 
-3. **Target Assessment**
+4. **Target Assessment with Full Features**
    ```bash
-   # Execute scenarios against target domain
-   est test 1 employee@target-company.com
-   est test 3 finance@target-company.com
+   # Scenario with attachment and reply-to
+   est test 1 employee@target-company.com \
+       --reply-to attacker@evil.com \
+       --attachment fake_invoice.pdf
+
+   # Custom HTML phishing simulation
+   est custom --from-email "hr@target-company.com" \
+              --from-name "HR Department" \
+              --subject "Benefits Enrollment Update" \
+              --body "Please review the attached document." \
+              --target "employee@target-company.com" \
+              --body-file phishing_template.html \
+              --attachment benefits_form.pdf
    ```
 
-4. **Custom Attack Simulation**
+5. **Bulk Campaign**
    ```bash
-   # Company-specific spoofing tests
-   est custom --from-email "ceo@target-company.com" \
-              --from-name "Target CEO Name" \
-              --subject "Quarterly Budget Review" \
-              --body "Please review attached budget..." \
-              --target "cfo@target-company.com"
+   # Send scenario to all employees
+   est bulk --scenario 1 --target-list all_employees.txt --delay 2
    ```
 
-5. **Results Analysis**
+6. **Results Analysis**
    ```bash
    # Review logs and generate report
    est logs --lines 100
    est report --output assessment_report.json
    ```
+
+### Email Threading (Conversation Injection)
+
+Thread injection allows spoofed emails to appear in an existing email conversation:
+
+```bash
+# Reply to an existing email thread
+est custom --from-email "ceo@company.com" \
+           --from-name "CEO" \
+           --subject "Re: Budget Approval" \
+           --body "Approved. Please proceed." \
+           --target "cfo@company.com" \
+           --in-reply-to "<original-message-id@company.com>" \
+           --references "<original-message-id@company.com>"
+```
 
 ### Integration with Security Testing
 
@@ -505,6 +602,18 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🔄 Changelog
 
+### v3.0.0 (2026-04-10)
+- **File Attachments** - Attach PDF, HTML, or any file type to spoofed emails
+- **HTML Email Body** - Send raw HTML or load HTML from a file as the email body
+- **Reply-To Header** - Set a custom Reply-To address to redirect replies
+- **Email Threading** - Inject emails into existing threads (In-Reply-To / References)
+- **Bulk / Multi-Target Sending** - Comma-separated targets or load from a file
+- **Send Throttling** - Configurable delay between sends for bulk campaigns
+- **DNS Validation** - Check SPF, DKIM, DMARC records before sending
+- **Standalone `dns-check` command** - Validate sender domain DNS from CLI
+- **Author updated** to paris
+- **Unified email builder** - Single method handles all message construction
+
 ### v2.0.1 (2025-06-12)
 - **Fixed Python 3.13+ compatibility** - Automatic virtual environment creation
 - **Enhanced Kali Linux support** - Optimized installation for latest Kali
@@ -546,10 +655,10 @@ For common issues:
 
 <div align="center">
 
-**EST v2.0.1** - Professional Email Security Assessment Framework
+**EST v3.0.0** - Professional Email Security Assessment Framework
 
 Compatible with Python 3.8+ including Python 3.13+ and Kali Linux
 
-Made with ❤️ by the Tech Sky - Security Research Team
+Made with ❤️ by paris
 
 </div>
