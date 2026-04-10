@@ -9,13 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Planned: OAuth2 authentication support for modern mail servers
-- Planned: Advanced template system for custom scenarios
 - Planned: Web-based dashboard for test management
 - Planned: Integration with popular penetration testing frameworks
 
 ### Changed
 - Planned: Improved error handling and user feedback
 - Planned: Enhanced logging with structured output
+
+## [3.1.0] - 2026-04-10
+
+### Added
+- **License Management System** - Machine-bound license keys using HMAC-SHA256 signatures
+  - `est license generate` - Owner-only key generation (bound to machine ID)
+  - `est license activate <key>` - Activate a license on the current machine
+  - `est license deactivate` - Remove stored license
+  - `est license status` - Show current license status (tier, expiration, machine binding)
+  - `est license machine-id` - Display current machine fingerprint
+  - All tool commands (except license management) require a valid license
+- **Plain Text Body from File** - `--body-text-file` flag to load email body from a text file (reusable templates)
+- **JSON Email Templates** - `--template` flag to load complete email configuration from a JSON file
+- **`_load_body_from_file()` method** - Loads plain-text body content from desktop files
+- **`_load_template()` method** - Loads full email config from JSON template files
+- **`_apply_template()` function** - Merges JSON template values with CLI arguments
+- **Templates directory** - `~/.est/templates/` for storing reusable templates
+- **Enhanced desktop launcher** - Supports multiple terminal emulators (gnome-terminal, xfce4-terminal, konsole, xterm)
+
+### Changed
+- **License changed** from MIT to Proprietary (license key required)
+- **Version bumped** to 3.1.0
+- **`--body` in `custom` command** is no longer required (can use `--body-text-file` or `--template` instead)
+- **install.sh root check** - No longer blocks running as root; warns instead and proceeds
+- **install.sh version** - Updated to 3.1.0, author to "paris"
+- **install.sh bash completion** - Now includes all commands: `bulk`, `dns-check`, `license` and all new flags
+- **install.sh Python version detection** - Now uses venv for Python 3.12+ (not just 3.13+)
+- **install.sh desktop entry** - Enhanced with multi-terminal support and proper desktop database updates
+- **Attachment help text** - Clarified support for PDF, HTML, DOCX, images, and any document type
+- **Repository URLs** - Updated from `techsky-eh/EST` to `LOBEG/ESET`
+
+### Fixed
+- install.sh root check that was **blocking installation** when run as root
+- install.sh bash completion was missing `bulk`, `dns-check`, and `license` commands
+- install.sh version mismatch (was 2.0.1, now matches est.py at 3.1.0)
+- install.sh author mismatch (was "Tech Sky - SRT", now "paris")
+- Desktop entry only worked with gnome-terminal; now auto-detects available terminal
 
 ## [3.0.0] - 2026-04-10
 

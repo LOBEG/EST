@@ -3,9 +3,9 @@
 # EST - Email Spoofing Tool
 # Professional Installation Script for Linux Systems (Fixed for Python 3.13+)
 #
-# Author: Security Research Team
-# Version: 2.0.1
-# License: MIT
+# Author: paris
+# Version: 3.1.0
+# License: Proprietary
 #
 
 set -e
@@ -21,8 +21,8 @@ readonly NC='\033[0m' # No Color
 
 # Tool configuration
 readonly TOOL_NAME="EST - Email Spoofing Tool"
-readonly TOOL_VERSION="2.0.1"
-readonly TOOL_AUTHOR="Tech Sky - SRT"
+readonly TOOL_VERSION="3.1.0"
+readonly TOOL_AUTHOR="paris"
 readonly INSTALL_DIR="/opt/est"
 readonly BIN_LINK="/usr/local/bin/est"
 readonly DESKTOP_DIR="/usr/share/applications"
@@ -39,7 +39,7 @@ print_banner() {
     echo -e "${BLUE}║     For Authorized Penetration Testing Only                  ║${NC}"
     echo -e "${BLUE}║     Educational & Research Purposes                          ║${NC}"
     echo -e "${BLUE}║                                                              ║${NC}"
-    echo -e "${BLUE}║  Author: ${TOOL_AUTHOR}${NC}${BLUE}                                      ║${NC}"
+    echo -e "${BLUE}║  Author: ${TOOL_AUTHOR}                                                ║${NC}"
     echo -e "${BLUE}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo
 }
@@ -64,12 +64,12 @@ print_step() {
     echo -e "${PURPLE}[→]${NC} $1"
 }
 
-# Check if running as root
+# Check if running as root (warn but allow)
 check_root() {
     if [[ $EUID -eq 0 ]]; then
-       print_error "Please don't run this script as root!"
-       echo -e "${YELLOW}💡 Run as regular user with sudo access: ./install.sh${NC}"
-       exit 1
+       print_warning "Running as root. Installation will proceed but the tool"
+       print_warning "will be configured for the root user's home directory."
+       print_info "For non-root users, re-run as a regular user with sudo access."
     fi
 }
 
@@ -104,9 +104,9 @@ check_system() {
     if [ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -ge 8 ]; then
         print_status "Python $PYTHON_VERSION detected (compatible)"
         
-        # Check if Python 3.13+ (externally managed environment)
-        if [ "$PYTHON_MINOR" -ge 13 ]; then
-            print_warning "Python 3.13+ detected - will use virtual environment"
+        # Check if Python 3.12+ (externally managed environment)
+        if [ "$PYTHON_MINOR" -ge 12 ]; then
+            print_warning "Python 3.12+ detected - will use virtual environment"
             USE_VENV=true
         else
             USE_VENV=false
@@ -296,7 +296,7 @@ setup_directories() {
     
     # Create user configuration directory
     USER_CONFIG_DIR="$HOME/.est"
-    mkdir -p "$USER_CONFIG_DIR"/{reports,logs,scenarios}
+    mkdir -p "$USER_CONFIG_DIR"/{reports,logs,scenarios,templates}
     print_status "Created user configuration directory: $USER_CONFIG_DIR"
     
     print_status "Directory structure created"
@@ -431,14 +431,14 @@ create_desktop_entry() {
     cat > "$DESKTOP_FILE" << EOF
 [Desktop Entry]
 Name=EST - Email Spoofing Tool
-Comment=Professional Email Security Assessment Framework
+Comment=Professional Email Security Assessment Framework v${TOOL_VERSION}
 GenericName=Security Testing Tool
-Exec=gnome-terminal --title="EST - Email Spoofing Tool" -- est
+Exec=bash -c 'if command -v gnome-terminal >/dev/null 2>&1; then gnome-terminal --title="EST - Email Spoofing Tool" -- bash -c "est --help; echo; echo Press Enter to continue...; read"; elif command -v xfce4-terminal >/dev/null 2>&1; then xfce4-terminal --title="EST - Email Spoofing Tool" -e "bash -c \\"est --help; echo; echo Press Enter to continue...; read\\""; elif command -v konsole >/dev/null 2>&1; then konsole -e bash -c "est --help; echo; echo Press Enter to continue...; read"; elif command -v xterm >/dev/null 2>&1; then xterm -e "est --help; echo; echo Press Enter to continue...; read"; else est --help; fi'
 Icon=security-high
-Terminal=true
+Terminal=false
 Type=Application
-Categories=Security;Network;Development;
-Keywords=email;security;testing;penetration;spoofing;assessment;
+Categories=Security;Network;Development;System;
+Keywords=email;security;testing;penetration;spoofing;assessment;phishing;
 StartupNotify=true
 EOF
     
@@ -448,6 +448,11 @@ EOF
         print_status "Created desktop entry"
     else
         print_status "Created user desktop entry"
+    fi
+    
+    # Update desktop database if available
+    if command -v update-desktop-database &> /dev/null; then
+        update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
     fi
     
     print_status "Desktop integration completed"
@@ -462,6 +467,21 @@ create_documentation() {
     # Create quick start guide
     cat > "$DOC_DIR/QUICKSTART.md" << 'EOF'
 # EST Quick Start Guide
+
+## License Activation
+
+EST requires a valid license key. Contact the author to obtain one.
+
+```bash
+# Show your machine ID (needed to get a license)
+est license machine-id
+
+# Activate your license
+est license activate <YOUR-KEY>
+
+# Check license status
+est license status
+```
 
 ## Basic Commands
 
@@ -484,12 +504,49 @@ est list
 # Execute predefined scenario
 est test 1 target@company.com
 
-# Custom spoofing test
+# Custom spoofing test with plain text
 est custom --from-email "ceo@company.com" \
            --from-name "John Smith" \
            --subject "Urgent Request" \
            --body "Please handle this immediately" \
            --target "employee@company.com"
+
+# Custom test with plain-text body loaded from a file
+est custom --from-email "ceo@company.com" \
+           --from-name "John Smith" \
+           --subject "Urgent Request" \
+           --body-text-file ~/Desktop/phish_body.txt \
+           --target "employee@company.com"
+
+# Custom test with attachments from Desktop
+est custom --from-email "hr@company.com" \
+           --from-name "HR Department" \
+           --subject "Updated Policy" \
+           --body "Please review the attached document." \
+           --target "employee@company.com" \
+           --attachment ~/Desktop/policy.pdf \
+           --attachment ~/Desktop/form.docx
+
+# Use a JSON template file
+est custom --template ~/Desktop/phish_template.json \
+           --target "employee@company.com"
+```
+
+### Bulk Email
+```bash
+# Bulk send using a scenario and email list file
+est bulk --scenario 1 \
+         --target-list ~/Desktop/targets.txt \
+         --delay 2
+
+# Bulk send with custom parameters and plain-text body from file
+est bulk --from-email "it@company.com" \
+         --from-name "IT Department" \
+         --subject "Password Reset Required" \
+         --body-text-file ~/Desktop/body.txt \
+         --target-list ~/Desktop/email_list.txt \
+         --attachment ~/Desktop/instructions.pdf \
+         --delay 1
 ```
 
 ### Monitor and Report
@@ -501,11 +558,29 @@ est logs --lines 50
 est report
 ```
 
+## Template File Format
+
+Create a JSON file (e.g., `phish_template.json`):
+
+```json
+{
+    "from_email": "ceo@company.com",
+    "from_name": "CEO John Smith",
+    "subject": "Urgent Wire Transfer",
+    "body": "Please process the attached invoice immediately.",
+    "html_body": "<h1>Urgent</h1><p>Please process the attached invoice.</p>",
+    "attachments": ["/home/user/Desktop/invoice.pdf"],
+    "reply_to": "attacker@evil.com"
+}
+```
+
 ## Configuration
 
 - Config file: `~/.est/config.json`
 - Log files: `~/.est/est_tests.log`
 - Reports: `~/.est/reports/`
+- Templates: `~/.est/templates/`
+- License: `~/.est/license.key`
 
 ## Troubleshooting
 
@@ -537,7 +612,7 @@ pip3 install --user --break-system-packages dnspython
 
 - Documentation: /opt/est/docs/
 - Examples: /opt/est/examples/
-- Issues: https://github.com/your-org/EST/issues
+- Issues: https://github.com/LOBEG/EST/issues
 EOF
 
     # Create troubleshooting guide
@@ -638,8 +713,8 @@ python3 -c "import dns.resolver; print('DNS module working')"
 
 ## Kali Linux Specific
 
-### Python 3.13+ Issues
-Kali Linux uses Python 3.13+ which has stricter package management:
+### Python 3.12+ / 3.13+ Issues
+Kali Linux uses Python 3.12+ which has stricter package management:
 
 ```bash
 # Always use virtual environment on Kali
@@ -679,7 +754,7 @@ _est_completion() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="server list test custom logs report"
+    commands="server list test custom bulk dns-check logs report license"
     
     case ${prev} in
         est)
@@ -691,7 +766,7 @@ _est_completion() {
             return 0
             ;;
         test)
-            COMPREPLY=( $(compgen -W "1 2 3 4 5" -- ${cur}) )
+            COMPREPLY=( $(compgen -W "1 2 3 4 5 --smtp-host --smtp-port --reply-to --in-reply-to --references --attachment --html-body --body-file --body-text-file --template --target-list --delay --no-dns-check" -- ${cur}) )
             return 0
             ;;
         logs)
@@ -703,7 +778,18 @@ _est_completion() {
             return 0
             ;;
         custom)
-            COMPREPLY=( $(compgen -W "--from-email --from-name --subject --body --target" -- ${cur}) )
+            COMPREPLY=( $(compgen -W "--from-email --from-name --subject --body --target --smtp-host --smtp-port --reply-to --in-reply-to --references --attachment --html-body --body-file --body-text-file --template --target-list --delay --no-dns-check" -- ${cur}) )
+            return 0
+            ;;
+        bulk)
+            COMPREPLY=( $(compgen -W "--scenario --from-email --from-name --subject --body --smtp-host --smtp-port --reply-to --in-reply-to --references --attachment --html-body --body-file --body-text-file --template --target-list --delay --no-dns-check" -- ${cur}) )
+            return 0
+            ;;
+        dns-check)
+            return 0
+            ;;
+        license)
+            COMPREPLY=( $(compgen -W "status activate deactivate generate machine-id" -- ${cur}) )
             return 0
             ;;
     esac
@@ -791,17 +877,23 @@ show_post_install_info() {
     fi
     echo
     echo -e "${BLUE}🎯 Quick Start Commands:${NC}"
-    echo -e "${YELLOW}   est server --port 2525${NC}        # Start SMTP server"
-    echo -e "${YELLOW}   est list${NC}                     # List attack scenarios"
-    echo -e "${YELLOW}   est test 1 target@email.com${NC}  # Run CEO fraud test"
-    echo -e "${YELLOW}   est logs${NC}                     # View test logs"
-    echo -e "${YELLOW}   est --help${NC}                   # Show all options"
+    echo -e "${YELLOW}   est license machine-id${NC}            # Get your machine ID"
+    echo -e "${YELLOW}   est license activate <KEY>${NC}         # Activate license"
+    echo -e "${YELLOW}   est server --port 2525${NC}             # Start SMTP server"
+    echo -e "${YELLOW}   est list${NC}                           # List attack scenarios"
+    echo -e "${YELLOW}   est test 1 target@email.com${NC}        # Run CEO fraud test"
+    echo -e "${YELLOW}   est bulk --scenario 1 --target-list targets.txt${NC}"
+    echo -e "${YELLOW}   est logs${NC}                           # View test logs"
+    echo -e "${YELLOW}   est --help${NC}                         # Show all options"
     echo
     echo -e "${BLUE}📖 Getting Started:${NC}"
-    echo -e "   1. Start EST server: ${YELLOW}est server --port 2525${NC}"
-    echo -e "   2. Get temp email from: ${YELLOW}https://guerrillamail.com${NC}"
-    echo -e "   3. Run first test: ${YELLOW}est test 1 your-temp-email@guerrillamail.com${NC}"
-    echo -e "   4. Check results: ${YELLOW}est logs${NC}"
+    echo -e "   1. Get your machine ID: ${YELLOW}est license machine-id${NC}"
+    echo -e "   2. Contact the author for a license key"
+    echo -e "   3. Activate license: ${YELLOW}est license activate <KEY>${NC}"
+    echo -e "   4. Start EST server: ${YELLOW}est server --port 2525${NC}"
+    echo -e "   5. Get temp email from: ${YELLOW}https://guerrillamail.com${NC}"
+    echo -e "   6. Run first test: ${YELLOW}est test 1 your-temp-email@guerrillamail.com${NC}"
+    echo -e "   7. Check results: ${YELLOW}est logs${NC}"
     echo
     echo -e "${BLUE}📚 Documentation:${NC}"
     echo -e "   • Quick Start: ${INSTALL_DIR}/docs/QUICKSTART.md"
@@ -846,7 +938,7 @@ main() {
     echo -e "${YELLOW}   System command: ${BIN_LINK}${NC}"
     if command -v python3 &> /dev/null; then
         PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-        if [[ "$PYTHON_VERSION" > "3.12" ]]; then
+        if [[ "$PYTHON_VERSION" > "3.11" ]]; then
             echo -e "${YELLOW}   Python $PYTHON_VERSION detected - will use virtual environment${NC}"
         fi
     fi
@@ -909,7 +1001,7 @@ if [ ! -f "est.py" ]; then
     echo "  • README.md (documentation)"
     echo "  • requirements.txt (dependencies)"
     echo
-    echo "Download from: https://github.com/techsky-eh/EST"
+    echo "Download from: https://github.com/LOBEG/ESET"
     exit 1
 fi
 

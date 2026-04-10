@@ -4,10 +4,10 @@
 
 ![EST Logo](https://img.shields.io/badge/EST-Email%20Spoofing%20Tool-red?style=for-the-badge&logo=security&logoColor=white)
 
-[![Version](https://img.shields.io/badge/version-3.0.0-blue.svg)](https://github.com/techsky-eh/EST)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-3.1.0-blue.svg)](https://github.com/LOBEG/ESET)
+[![License](https://img.shields.io/badge/license-Proprietary-orange.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8+-yellow.svg)](https://python.org)
-[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](https://github.com/techsky-eh/EST)
+[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](https://github.com/LOBEG/ESET)
 [![Kali](https://img.shields.io/badge/Kali%20Linux-Compatible-purple.svg)](https://kali.org)
 
 **Professional Email Security Assessment Framework**
@@ -30,17 +30,21 @@ EST (Email Spoofing Tool) is a comprehensive, professional-grade framework desig
 - **Professional SMTP Server** - Multi-threaded, RFC-compliant SMTP server for testing
 - **Pre-built Attack Scenarios** - 5 realistic email spoofing scenarios covering common attack vectors
 - **Custom Test Creation** - Build and execute custom spoofing tests with full control
-- **File Attachments** - Attach PDF, HTML, or any file to spoofed emails
+- **File Attachments** - Attach PDF, HTML, DOCX, images, or any document type from your desktop
 - **HTML Email Body** - Send raw HTML content as the email body or load from file
+- **Plain Text Body from File** - Load email body from a text file (`--body-text-file`) for reusable templates
+- **JSON Email Templates** - Load entire email configuration from a JSON template (`--template`)
 - **Reply-To Spoofing** - Set a custom Reply-To header to redirect replies
 - **Email Threading** - Inject emails into existing threads using In-Reply-To and References headers
-- **Bulk / Multi-Target Sending** - Send to comma-separated targets, or load from a file
+- **Bulk / Multi-Target Sending** - Send to comma-separated targets, or load email list from a file
 - **Send Throttling** - Rate-limit bulk sends with configurable delays between emails
 - **DNS Validation** - Check SPF, DKIM, and DMARC records for sender domains before spoofing
+- **License Management** - Machine-bound license keys controlled by the owner
+- **Desktop Integration** - Desktop launcher for Linux GUI environments
 - **Comprehensive Logging** - Detailed audit trails for all security tests
 - **Assessment Reporting** - Generate professional security assessment reports
 - **Real-time Email Relay** - Automatic delivery to real email destinations for testing
-- **Python 3.13+ Compatible** - Works with latest Python versions including Kali Linux
+- **Python 3.12+ / 3.13+ Compatible** - Works with latest Python versions including Kali Linux
 
 ### 🎭 Attack Scenarios Included
 
@@ -56,53 +60,57 @@ EST (Email Spoofing Tool) is a comprehensive, professional-grade framework desig
 
 ```
 EST Framework
+├── License Manager (Machine-bound keys)
 ├── SMTP Testing Server (Multi-threaded)
 ├── Scenario Engine (Pre-built + Custom)
-├── Unified Email Builder (Attachments, HTML, Threading)
-├── Bulk Sending Engine (Multi-target + Throttling)
+├── Unified Email Builder (Attachments, HTML, Plain Text, Templates)
+├── Bulk Sending Engine (Multi-target + Throttling + Email Lists)
 ├── DNS Validator (SPF / DKIM / DMARC)
 ├── Email Relay System (MX Resolution)
 ├── Audit & Logging System
 ├── Report Generation Engine
-├── Python Environment Manager (3.13+ compatible)
+├── Desktop Integration (Linux GUI)
+├── Python Environment Manager (3.12+ / 3.13+ compatible)
 └── Professional CLI Interface
 ```
 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Python 3.8 or higher (including Python 3.13+)
+- Python 3.8 or higher (including Python 3.12+ / 3.13+)
 - Linux/macOS/Windows (optimized for Kali Linux)
 - Network connectivity for email delivery testing
+- Valid EST license key (contact the author)
 
 ### Installation
 
-#### 🐧 Kali Linux / Python 3.13+ (Recommended)
+#### 🐧 Kali Linux / Python 3.12+ (Recommended)
 
 ```bash
 # Clone the repository
-git clone https://github.com/techsky-eh/EST.git
-cd EST
+git clone https://github.com/LOBEG/ESET.git
+cd ESET
 
 # Make installer executable
 chmod +x install.sh
 
-# Run the fixed installer (handles Python 3.13+ automatically)
+# Run the installer (handles Python 3.12+ / 3.13+ automatically)
 ./install.sh
 ```
 
 The installer will automatically:
-- Detect Python 3.13+ and create a virtual environment
+- Detect Python 3.12+ and create a virtual environment
 - Install system dependencies via apt
 - Handle externally-managed-environment issues
 - Create isolated Python environment for EST
+- Create desktop launcher for GUI environments
 
 #### 🖥️ Other Linux Distributions
 
 ```bash
 # Clone the repository
-git clone https://github.com/techsky-eh/EST.git
-cd EST
+git clone https://github.com/LOBEG/ESET.git
+cd ESET
 
 # Install dependencies
 pip install -r requirements.txt
@@ -118,9 +126,29 @@ sudo ./install.sh
 brew install python3 telnet
 
 # Clone and install EST
-git clone https://github.com/techsky-eh/EST.git
-cd EST
+git clone https://github.com/LOBEG/ESET.git
+cd ESET
 ./install.sh
+```
+
+### License Activation
+
+EST requires a valid license key before use. License keys are machine-bound.
+
+```bash
+# Step 1: Get your machine ID
+est license machine-id
+
+# Step 2: Send your machine ID to the EST author to receive a key
+
+# Step 3: Activate the license key
+est license activate <YOUR-LICENSE-KEY>
+
+# Check license status
+est license status
+
+# Remove license
+est license deactivate
 ```
 
 ### Basic Usage
@@ -145,11 +173,31 @@ est custom --from-email "ceo@company.com" \
            --attachment /path/to/report.pdf \
            --html-body "<h1>Urgent!</h1><p>See attached.</p>"
 
+# Use a plain-text body from a file (template from desktop)
+est custom --from-email "ceo@company.com" \
+           --from-name "John Smith" \
+           --subject "Quarterly Review" \
+           --body-text-file ~/Desktop/email_body.txt \
+           --target "employee@company.com" \
+           --attachment ~/Desktop/report.pdf
+
+# Use a JSON template file for full email configuration
+est custom --template ~/Desktop/phish_template.json \
+           --target "employee@company.com"
+
 # Send to multiple targets with throttling
 est test 1 "a@company.com,b@company.com,c@company.com" --delay 2
 
 # Bulk send from a target list file
 est bulk --scenario 1 --target-list targets.txt --delay 1.5
+
+# Bulk send with custom body from a file and attachments from desktop
+est bulk --from-email "hr@company.com" \
+         --from-name "HR Department" \
+         --subject "Updated Policy" \
+         --body-text-file ~/Desktop/body.txt \
+         --target-list ~/Desktop/email_list.txt \
+         --attachment ~/Desktop/policy.pdf
 
 # Check DNS records for a sender domain before spoofing
 est dns-check ceo@targetcompany.com
@@ -244,6 +292,58 @@ est dns-check targetcompany.com
 est test 1 target@company.com --no-dns-check
 ```
 
+#### Templates & Desktop File Support
+```bash
+# Load plain-text body from a file on your desktop
+est custom --from-email "ceo@company.com" \
+           --from-name "CEO" \
+           --subject "Report" \
+           --body-text-file ~/Desktop/email_body.txt \
+           --target "employee@company.com"
+
+# Load full email config from a JSON template
+est custom --template ~/Desktop/phish_template.json \
+           --target "employee@company.com"
+
+# Attach any document type from desktop
+est test 1 target@company.com \
+    --attachment ~/Desktop/report.pdf \
+    --attachment ~/Desktop/spreadsheet.xlsx \
+    --attachment ~/Desktop/image.png
+```
+
+**JSON Template Format** (`phish_template.json`):
+```json
+{
+    "from_email": "ceo@company.com",
+    "from_name": "CEO John Smith",
+    "subject": "Urgent Wire Transfer",
+    "body": "Please process the attached invoice immediately.",
+    "html_body": "<h1>Urgent</h1><p>See attached invoice.</p>",
+    "attachments": ["/home/user/Desktop/invoice.pdf"],
+    "reply_to": "attacker@evil.com"
+}
+```
+
+#### License Management
+```bash
+# Show current license status
+est license status
+
+# Get this machine's fingerprint (needed to obtain a license)
+est license machine-id
+
+# Activate a license key
+est license activate <LICENSE-KEY>
+
+# Remove stored license
+est license deactivate
+
+# Generate a license key (owner only)
+est license generate --days 365 --tier pro
+est license generate --machine-id <TARGET-MACHINE-ID> --days 90
+```
+
 #### Monitoring & Reporting
 ```bash
 # View recent test logs
@@ -265,7 +365,7 @@ EST stores configuration in `~/.est/config.json`:
 
 ```json
 {
-  "version": "3.0.0",
+  "version": "3.1.0",
   "smtp_server": {
     "host": "0.0.0.0",
     "port": 2525,
