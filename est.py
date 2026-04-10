@@ -4,9 +4,9 @@ EST - Email Spoofing Tool
 Professional Email Security Assessment Framework
 
 Author: paris
-Version: 3.0.0
-License: MIT
-Repository: https://github.com/your-org/EST
+Version: 3.1.0
+License: Proprietary (License Key Required)
+Repository: https://github.com/LOBEG/ESET
 
 LEGAL NOTICE:
 This tool is designed for authorized security testing, penetration testing,
@@ -29,7 +29,10 @@ import time
 import subprocess
 import signal
 import mimetypes
-from datetime import datetime
+import hashlib
+import uuid
+import base64
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import logging
@@ -45,10 +48,230 @@ from email.utils import formatdate
 import email.utils
 
 # Version and metadata
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 __author__ = "paris"
-__license__ = "MIT"
+__license__ = "Proprietary"
 __description__ = "Professional Email Security Assessment Framework"
+
+# License configuration – only the owner can generate valid keys
+_LICENSE_MASTER_SECRET = "EST-PARIS-MASTER-KEY-2024-SECURE"
+
+
+# ======================================================================
+# License Management System
+# ======================================================================
+
+class LicenseManager:
+    """Manages license validation for EST.
+
+    License keys are HMAC-SHA256 based tokens tied to a machine fingerprint.
+    Only the owner (who knows _LICENSE_MASTER_SECRET) can generate valid keys
+    using the ``est license generate`` command.
+    """
+
+    LICENSE_FILE_NAME = "license.key"
+
+    def __init__(self, config_dir: Optional[Path] = None):
+        self.config_dir = config_dir or (Path.home() / ".est")
+        self.config_dir.mkdir(exist_ok=True)
+        self.license_file = self.config_dir / self.LICENSE_FILE_NAME
+
+    # ------------------------------------------------------------------
+    # Machine fingerprint
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_machine_id() -> str:
+        """Return a stable machine identifier."""
+        parts: List[str] = []
+
+        # /etc/machine-id (Linux)
+        mid_path = Path("/etc/machine-id")
+        if mid_path.exists():
+            parts.append(mid_path.read_text().strip())
+
+        # Hostname
+        parts.append(socket.gethostname())
+
+        # MAC address fallback
+        parts.append(str(uuid.getnode()))
+
+        combined = "|".join(parts)
+        return hashlib.sha256(combined.encode()).hexdigest()[:32]
+
+    # ------------------------------------------------------------------
+    # Key generation (owner-only)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def generate_license_key(machine_id: Optional[str] = None,
+                             days_valid: int = 365,
+                             tier: str = "pro") -> str:
+        """Generate a license key.  Only the owner can call this because
+        the master secret is embedded in the source.
+
+        Key format: ``BASE64( JSON({machine_id, expires, tier, sig}) )``
+        """
+        if machine_id is None:
+            machine_id = LicenseManager._get_machine_id()
+
+        expires = (datetime.now(tz=None) + timedelta(days=days_valid)).isoformat()
+
+        payload = {
+            "machine_id": machine_id,
+            "expires": expires,
+            "tier": tier,
+            "version": __version__,
+        }
+
+        sig_input = f"{machine_id}|{expires}|{tier}|{_LICENSE_MASTER_SECRET}"
+        payload["sig"] = hashlib.sha256(sig_input.encode()).hexdigest()
+
+        raw_json = json.dumps(payload, separators=(",", ":"))
+        return base64.urlsafe_b64encode(raw_json.encode()).decode()
+
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
+
+    def validate_license(self, key: Optional[str] = None) -> Dict:
+        """Validate a license key and return status dict.
+
+        Checks: signature, machine binding, expiration date.
+        """
+        result: Dict = {
+            "valid": False,
+            "tier": None,
+            "expires": None,
+            "machine_match": False,
+            "error": None,
+        }
+
+        if key is None:
+            key = self._load_stored_key()
+            if key is None:
+                result["error"] = "No license key found. Use 'est license activate <key>' to activate."
+                return result
+
+        try:
+            raw = base64.urlsafe_b64decode(key.encode())
+            payload = json.loads(raw)
+        except Exception:
+            result["error"] = "Malformed license key"
+            return result
+
+        required = {"machine_id", "expires", "tier", "sig"}
+        if not required.issubset(payload.keys()):
+            result["error"] = "Incomplete license key"
+            return result
+
+        # Signature check
+        sig_input = (
+            f"{payload['machine_id']}|{payload['expires']}|"
+            f"{payload['tier']}|{_LICENSE_MASTER_SECRET}"
+        )
+        expected_sig = hashlib.sha256(sig_input.encode()).hexdigest()
+        if payload["sig"] != expected_sig:
+            result["error"] = "Invalid license key (signature mismatch)"
+            return result
+
+        # Machine binding
+        current_machine = self._get_machine_id()
+        result["machine_match"] = payload["machine_id"] == current_machine
+        if not result["machine_match"]:
+            result["error"] = "License key is bound to a different machine"
+            return result
+
+        # Expiration
+        try:
+            expires_dt = datetime.fromisoformat(payload["expires"])
+        except Exception:
+            result["error"] = "Invalid expiration date in key"
+            return result
+
+        result["expires"] = payload["expires"]
+        result["tier"] = payload["tier"]
+
+        if datetime.now(tz=None) > expires_dt:
+            result["error"] = f"License expired on {payload['expires']}"
+            return result
+
+        result["valid"] = True
+        return result
+
+    # ------------------------------------------------------------------
+    # Storage
+    # ------------------------------------------------------------------
+
+    def activate_license(self, key: str) -> Dict:
+        """Validate and store a license key."""
+        status = self.validate_license(key)
+        if status["valid"]:
+            self.license_file.write_text(key.strip())
+            status["message"] = f"License activated successfully (tier={status['tier']}, expires={status['expires']})"
+        return status
+
+    def deactivate_license(self) -> bool:
+        """Remove stored license."""
+        if self.license_file.exists():
+            self.license_file.unlink()
+            return True
+        return False
+
+    def _load_stored_key(self) -> Optional[str]:
+        if self.license_file.exists():
+            return self.license_file.read_text().strip()
+        return None
+
+    def get_status(self) -> Dict:
+        """Return current license status (for display)."""
+        key = self._load_stored_key()
+        if key is None:
+            return {"active": False, "error": "No license key installed"}
+        status = self.validate_license(key)
+        status["active"] = status["valid"]
+        return status
+
+    def print_status(self):
+        """Pretty-print current license status."""
+        st = self.get_status()
+        print("\n🔑 EST License Status")
+        print("─" * 40)
+        if st.get("valid") or st.get("active"):
+            print(f"   ✅ Status:  ACTIVE")
+            print(f"   🏷️  Tier:    {st.get('tier', 'unknown').upper()}")
+            print(f"   📅 Expires: {st.get('expires', 'N/A')}")
+            print(f"   🖥️  Machine: Bound to this device")
+        else:
+            print(f"   ❌ Status:  INACTIVE")
+            print(f"   ⚠️  Reason:  {st.get('error', 'Unknown')}")
+        print()
+
+    def require_license(self) -> bool:
+        """Enforce license before running any tool command.
+
+        Returns True if license is valid, False otherwise (also prints
+        a user-friendly message).
+        """
+        st = self.validate_license()
+        if st["valid"]:
+            return True
+
+        print("\n🔒 EST License Required")
+        print("─" * 40)
+        print(f"   {st.get('error', 'License validation failed')}")
+        print()
+        print("   To activate a license:")
+        print("     est license activate <YOUR-LICENSE-KEY>")
+        print()
+        print("   To obtain a license, contact the EST author.")
+        print()
+        return False
+
+
+# ======================================================================
+# Data classes
+# ======================================================================
 
 @dataclass
 class EmailScenario:
@@ -225,10 +448,12 @@ class ESTConfig:
         self.config_file = self.config_dir / "config.json"
         self.log_file = self.config_dir / "est_tests.log"
         self.reports_dir = self.config_dir / "reports"
+        self.templates_dir = self.config_dir / "templates"
         
         # Create directories
         self.config_dir.mkdir(exist_ok=True)
         self.reports_dir.mkdir(exist_ok=True)
+        self.templates_dir.mkdir(exist_ok=True)
         
         # Load configuration
         self.config = self._load_config()
@@ -639,6 +864,7 @@ class EST:
         self.config = ESTConfig()
         self.scenarios = [EmailScenario(**s) for s in self.config.config['scenarios']]
         self.dns_validator = DNSValidator(self.config.logger)
+        self.license_mgr = LicenseManager(self.config.config_dir)
     
     def print_banner(self):
         """Print professional banner"""
@@ -877,6 +1103,54 @@ class EST:
                 print(f"⚠️  HTML body file not found: {body_file}")
         return None
 
+    def _load_body_from_file(self, body_text_file: Optional[str] = None) -> Optional[str]:
+        """Load plain-text email body from a file (template).
+
+        This is different from --body-file (which loads HTML).  This loads the
+        plain-text --body content from a file so users can prepare templates on
+        their desktop and reference them by path.
+        """
+        if not body_text_file:
+            return None
+        bf_path = Path(body_text_file)
+        if bf_path.is_file():
+            with open(bf_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            self.config.logger.info(f"📄 Loaded plain-text body from: {body_text_file} ({len(content)} chars)")
+            return content
+        else:
+            print(f"⚠️  Body text file not found: {body_text_file}")
+            return None
+
+    def _load_template(self, template_path: str) -> Optional[Dict]:
+        """Load a full email template from a JSON file.
+
+        Template JSON format::
+
+            {
+                "from_email": "ceo@company.com",
+                "from_name": "CEO",
+                "subject": "Important",
+                "body": "Plain text body here ...",
+                "html_body": "<h1>Optional HTML</h1>",
+                "attachments": ["/home/user/Desktop/report.pdf"]
+            }
+
+        Any field present in the template overrides the corresponding CLI arg.
+        """
+        tp = Path(template_path)
+        if not tp.is_file():
+            print(f"❌ Template file not found: {template_path}")
+            return None
+        try:
+            with open(tp, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            self.config.logger.info(f"📑 Loaded template: {template_path}")
+            return data
+        except json.JSONDecodeError as e:
+            print(f"❌ Invalid JSON template: {e}")
+            return None
+
     # ------------------------------------------------------------------
     # Scenario runner
     # ------------------------------------------------------------------
@@ -889,6 +1163,7 @@ class EST:
                      attachments: Optional[List[str]] = None,
                      html_body: Optional[str] = None,
                      body_file: Optional[str] = None,
+                     body_text_file: Optional[str] = None,
                      target_list: Optional[str] = None,
                      delay: float = 0,
                      validate_dns: bool = True) -> bool:
@@ -913,6 +1188,13 @@ class EST:
 
         # Load optional HTML body
         resolved_html = self._load_html_body(html_body, body_file)
+
+        # Override scenario body with plain-text template file if provided
+        effective_body = scenario.body
+        if body_text_file:
+            loaded = self._load_body_from_file(body_text_file)
+            if loaded:
+                effective_body = loaded
 
         print(f"\n🎯 Executing Email Spoofing Test")
         print(f"─" * 40)
@@ -943,7 +1225,7 @@ class EST:
                     from_name=scenario.from_name,
                     to_email=tgt,
                     subject=scenario.subject,
-                    body=scenario.body,
+                    body=effective_body,
                     html_body=resolved_html,
                     attachments=attachments,
                     reply_to=reply_to,
@@ -1019,6 +1301,7 @@ class EST:
                         attachments: Optional[List[str]] = None,
                         html_body: Optional[str] = None,
                         body_file: Optional[str] = None,
+                        body_text_file: Optional[str] = None,
                         target_list: Optional[str] = None,
                         delay: float = 0,
                         validate_dns: bool = True) -> bool:
@@ -1037,6 +1320,13 @@ class EST:
 
         # Load optional HTML body
         resolved_html = self._load_html_body(html_body, body_file)
+
+        # Override body with plain-text template file if provided
+        effective_body = body
+        if body_text_file:
+            loaded = self._load_body_from_file(body_text_file)
+            if loaded:
+                effective_body = loaded
 
         print(f"\n🎯 Executing Custom Email Spoofing Test")
         print(f"─" * 45)
@@ -1065,7 +1355,7 @@ class EST:
                     from_name=from_name,
                     to_email=tgt,
                     subject=subject,
-                    body=body,
+                    body=effective_body,
                     html_body=resolved_html,
                     attachments=attachments,
                     reply_to=reply_to,
@@ -1139,6 +1429,7 @@ class EST:
                       attachments: Optional[List[str]] = None,
                       html_body: Optional[str] = None,
                       body_file: Optional[str] = None,
+                      body_text_file: Optional[str] = None,
                       from_email: Optional[str] = None,
                       from_name: Optional[str] = None,
                       subject: Optional[str] = None,
@@ -1157,6 +1448,7 @@ class EST:
                 attachments=attachments,
                 html_body=html_body,
                 body_file=body_file,
+                body_text_file=body_text_file,
                 target_list=target_list,
                 delay=delay,
                 validate_dns=validate_dns,
@@ -1176,6 +1468,7 @@ class EST:
                 attachments=attachments,
                 html_body=html_body,
                 body_file=body_file,
+                body_text_file=body_text_file,
                 target_list=target_list,
                 delay=delay,
                 validate_dns=validate_dns,
@@ -1448,17 +1741,45 @@ def _add_common_send_args(parser: argparse.ArgumentParser):
     parser.add_argument('--references', default=None,
                         help='Message-ID references for threading (References header)')
     parser.add_argument('--attachment', action='append', default=None, dest='attachments',
-                        help='File path to attach (PDF, HTML, etc.). Repeat for multiple files.')
+                        help='File path to attach (PDF, HTML, DOCX, images, any type). Repeat for multiple files.')
     parser.add_argument('--html-body', default=None,
                         help='Raw HTML string to use as email body (alternative part)')
     parser.add_argument('--body-file', default=None,
                         help='Path to an HTML file whose contents will be used as email body')
+    parser.add_argument('--body-text-file', default=None,
+                        help='Path to a plain-text file to use as the email body (template)')
+    parser.add_argument('--template', default=None,
+                        help='Path to a JSON template file that pre-fills email fields')
     parser.add_argument('--target-list', default=None,
                         help='Path to a file containing target emails (one per line)')
     parser.add_argument('--delay', type=float, default=0,
                         help='Seconds to wait between sends for bulk/multiple targets (default: 0)')
     parser.add_argument('--no-dns-check', action='store_true', default=False,
                         help='Skip DNS (SPF/DKIM/DMARC) validation of sender domain')
+
+
+def _apply_template(est: EST, args, is_custom: bool = False):
+    """If --template is provided, load the JSON template and merge its fields
+    into the argparse namespace so callers don't need special handling."""
+    if not getattr(args, 'template', None):
+        return
+
+    tpl = est._load_template(args.template)
+    if tpl is None:
+        sys.exit(1)
+
+    # Merge: template values fill in missing CLI args
+    for key in ('from_email', 'from_name', 'subject', 'body', 'html_body',
+                'reply_to', 'in_reply_to', 'references', 'target', 'target_list',
+                'body_text_file', 'body_file'):
+        tpl_key = key.replace('-', '_')
+        if tpl_key in tpl and (getattr(args, tpl_key, None) is None or getattr(args, tpl_key, None) == ''):
+            setattr(args, tpl_key, tpl[tpl_key])
+
+    # Attachments: extend (don't replace)
+    if 'attachments' in tpl and tpl['attachments']:
+        existing = getattr(args, 'attachments', None) or []
+        setattr(args, 'attachments', existing + tpl['attachments'])
 
 
 def main():
@@ -1481,12 +1802,18 @@ Examples:
          --reply-to "real@attacker.com" \\
          --attachment report.pdf \\
          --html-body "<h1>Urgent</h1>"      Custom test with all features
+  est custom --template ~/Desktop/phish.json \\
+         --target "user@company.com"        Use a JSON template
   est bulk --scenario 1 \\
          --target-list targets.txt \\
          --delay 2                          Bulk scenario against list
   est dns-check ceo@company.com             Check sender DNS records
   est logs --lines 50                       View recent test logs
   est report                                Generate assessment report
+  est license status                        Show license status
+  est license activate <KEY>                Activate a license key
+  est license generate                      Generate a key (owner only)
+  est license machine-id                    Show this machine's ID
 
 EST v{__version__} - Professional Email Security Assessment Framework
 Author: {__author__} | License: {__license__}
@@ -1526,8 +1853,8 @@ Author: {__author__} | License: {__license__}
                               help='Spoofed sender display name')
     custom_parser.add_argument('--subject', required=True,
                               help='Email subject line')
-    custom_parser.add_argument('--body', required=True,
-                              help='Email body content (plain text)')
+    custom_parser.add_argument('--body', default='',
+                              help='Email body content (plain text). Use --body-text-file for file input.')
     custom_parser.add_argument('--target', default='',
                               help='Target email address (comma-separated for multiple)')
     _add_common_send_args(custom_parser)
@@ -1544,7 +1871,7 @@ Author: {__author__} | License: {__license__}
     bulk_parser.add_argument('--subject', default=None,
                             help='Email subject (required for custom bulk)')
     bulk_parser.add_argument('--body', default=None,
-                            help='Email body (required for custom bulk)')
+                            help='Email body (required for custom bulk, or use --body-text-file)')
     _add_common_send_args(bulk_parser)
 
     # DNS check command
@@ -1560,7 +1887,23 @@ Author: {__author__} | License: {__license__}
     # Report command
     report_parser = subparsers.add_parser('report', help='Generate assessment report')
     report_parser.add_argument('--output', help='Output file path (default: auto-generated)')
-    
+
+    # License command
+    license_parser = subparsers.add_parser('license', help='Manage EST license')
+    license_sub = license_parser.add_subparsers(dest='license_action', help='License actions')
+    license_sub.add_parser('status', help='Show current license status')
+    lic_activate = license_sub.add_parser('activate', help='Activate a license key')
+    lic_activate.add_argument('key', help='License key to activate')
+    license_sub.add_parser('deactivate', help='Remove stored license')
+    lic_gen = license_sub.add_parser('generate', help='Generate a license key (owner only)')
+    lic_gen.add_argument('--machine-id', default=None,
+                         help='Target machine ID (default: this machine)')
+    lic_gen.add_argument('--days', type=int, default=365,
+                         help='Days valid (default: 365)')
+    lic_gen.add_argument('--tier', default='pro', choices=['basic', 'pro', 'enterprise'],
+                         help='License tier (default: pro)')
+    license_sub.add_parser('machine-id', help='Show this machine\'s fingerprint')
+
     args = parser.parse_args()
     
     # Initialize EST
@@ -1571,7 +1914,54 @@ Author: {__author__} | License: {__license__}
         est.print_banner()
         parser.print_help()
         return
-    
+
+    # ---- License management (no license check needed for these) ----
+    if args.command == 'license':
+        if not args.license_action:
+            license_parser.print_help()
+            return
+
+        if args.license_action == 'status':
+            est.license_mgr.print_status()
+
+        elif args.license_action == 'activate':
+            result = est.license_mgr.activate_license(args.key)
+            if result["valid"]:
+                print(f"✅ {result.get('message', 'License activated')}")
+            else:
+                print(f"❌ Activation failed: {result.get('error')}")
+                sys.exit(1)
+
+        elif args.license_action == 'deactivate':
+            if est.license_mgr.deactivate_license():
+                print("✅ License removed")
+            else:
+                print("⚠️  No license was installed")
+
+        elif args.license_action == 'generate':
+            mid = args.machine_id or LicenseManager._get_machine_id()
+            key = LicenseManager.generate_license_key(
+                machine_id=mid, days_valid=args.days, tier=args.tier
+            )
+            print(f"\n🔑 Generated License Key")
+            print("─" * 60)
+            print(f"   Machine ID: {mid}")
+            print(f"   Tier:       {args.tier}")
+            print(f"   Valid for:  {args.days} days")
+            print(f"\n   Key:\n   {key}\n")
+            print("   To activate: est license activate <key>")
+
+        elif args.license_action == 'machine-id':
+            mid = LicenseManager._get_machine_id()
+            print(f"\n🖥️  Machine ID: {mid}\n")
+            print("   Provide this ID to the EST author to obtain a license key.")
+
+        return
+
+    # ---- For all other commands, enforce license ----
+    if not est.license_mgr.require_license():
+        sys.exit(1)
+
     if args.command == 'server':
         # Check port permissions
         if args.port <= 1024 and hasattr(os, 'geteuid') and os.geteuid() != 0:
@@ -1593,6 +1983,7 @@ Author: {__author__} | License: {__license__}
     
     elif args.command == 'test':
         est.print_banner()
+        _apply_template(est, args)
         success = est.run_scenario(
             scenario_id=args.scenario,
             target=args.target,
@@ -1604,6 +1995,7 @@ Author: {__author__} | License: {__license__}
             attachments=args.attachments,
             html_body=args.html_body,
             body_file=args.body_file,
+            body_text_file=args.body_text_file,
             target_list=args.target_list,
             delay=args.delay,
             validate_dns=not args.no_dns_check,
@@ -1612,11 +2004,23 @@ Author: {__author__} | License: {__license__}
     
     elif args.command == 'custom':
         est.print_banner()
+        _apply_template(est, args)
+
+        # Resolve body: CLI --body wins, then --body-text-file
+        effective_body = args.body
+        if not effective_body and args.body_text_file:
+            loaded = est._load_body_from_file(args.body_text_file)
+            if loaded:
+                effective_body = loaded
+        if not effective_body:
+            print("❌ Email body is required. Provide --body, --body-text-file, or --template")
+            sys.exit(1)
+
         success = est.run_custom_test(
             from_email=args.from_email,
             from_name=args.from_name,
             subject=args.subject,
-            body=args.body,
+            body=effective_body,
             target=args.target,
             smtp_host=args.smtp_host,
             smtp_port=args.smtp_port,
@@ -1626,6 +2030,7 @@ Author: {__author__} | License: {__license__}
             attachments=args.attachments,
             html_body=args.html_body,
             body_file=args.body_file,
+            body_text_file=args.body_text_file,
             target_list=args.target_list,
             delay=args.delay,
             validate_dns=not args.no_dns_check,
@@ -1634,9 +2039,18 @@ Author: {__author__} | License: {__license__}
 
     elif args.command == 'bulk':
         est.print_banner()
+        _apply_template(est, args)
         if not args.target_list:
             print("❌ --target-list is required for bulk command")
             sys.exit(1)
+
+        # For custom bulk, allow body from --body-text-file
+        effective_body = args.body
+        if not effective_body and getattr(args, 'body_text_file', None):
+            loaded = est._load_body_from_file(args.body_text_file)
+            if loaded:
+                effective_body = loaded
+
         success = est.run_bulk_test(
             scenario_id=args.scenario,
             target_list=args.target_list,
@@ -1649,10 +2063,11 @@ Author: {__author__} | License: {__license__}
             attachments=args.attachments,
             html_body=args.html_body,
             body_file=args.body_file,
+            body_text_file=args.body_text_file,
             from_email=args.from_email,
             from_name=args.from_name,
             subject=args.subject,
-            body=args.body,
+            body=effective_body,
             validate_dns=not args.no_dns_check,
         )
         sys.exit(0 if success else 1)
