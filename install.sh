@@ -157,8 +157,10 @@ install_dependencies() {
         fi
         
         # Handle python3-venv: use versioned package for Python 3.12+
-        # On mixed-Python systems (e.g. Kali with Python 3.13 but python3-venv
-        # linked to 3.11) the generic python3-venv meta-package will fail.
+        # On systems where the default Python differs from the python3-venv
+        # meta-package version (e.g. Kali with Python 3.13 but python3-venv
+        # linked to 3.11) the generic meta-package will fail with dependency
+        # conflicts.  We try the versioned package first (python3.13-venv).
         if [ "$USE_VENV" = true ]; then
             VENV_PKG="python3.${PYTHON_MINOR}-venv"
             if sudo apt install -y "$VENV_PKG" 2>/dev/null; then
@@ -166,10 +168,10 @@ install_dependencies() {
             elif sudo apt install -y python3-venv 2>/dev/null; then
                 print_status "Installed python3-venv"
             else
-                print_warning "Could not install venv via apt, trying ensurepip fallback..."
-                # Python 3.12+ ships venv in the stdlib; ensurepip is the
-                # only extra piece. If the versioned dev package is present
-                # the built-in venv module will work.
+                print_warning "Could not install venv via apt, checking built-in module..."
+                # Python 3.12+ ships the venv module in the standard library.
+                # The apt package mainly provides the ensurepip seed bundles.
+                # If the module is already importable, we can proceed.
                 if python3 -c "import venv" 2>/dev/null; then
                     print_status "Python venv module already available (built-in)"
                 else
