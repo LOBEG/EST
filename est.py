@@ -3,8 +3,8 @@
 EST - Email Spoofing Tool
 Professional Email Security Assessment Framework
 
-Author: Security Research Team
-Version: 2.0.1
+Author: paris
+Version: 3.0.0
 License: MIT
 Repository: https://github.com/your-org/EST
 
@@ -28,21 +28,25 @@ import smtplib
 import time
 import subprocess
 import signal
+import mimetypes
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email.mime.application import MIMEApplication
+from email import encoders
 from email.header import Header
 from email.utils import formatdate
 import email.utils
 
 # Version and metadata
-__version__ = "2.0.1"
-__author__ = "Tech Sky - SRT"
+__version__ = "3.0.0"
+__author__ = "paris"
 __license__ = "MIT"
 __description__ = "Professional Email Security Assessment Framework"
 
@@ -68,6 +72,150 @@ class TestResult:
     from_email: str
     success: bool
     details: Dict
+
+
+class DNSValidator:
+    """Validates DNS records (SPF, DKIM, DMARC) for sender domains to improve deliverability"""
+
+    def __init__(self, logger: Optional[logging.Logger] = None):
+        self.logger = logger or logging.getLogger('EST.DNS')
+        self._dns_available = False
+        try:
+            import dns.resolver
+            self._dns_available = True
+        except ImportError:
+            self.logger.warning("dnspython not installed; DNS validation will be limited")
+
+    def validate_sender_domain(self, sender_email: str) -> Dict:
+        """Run full DNS validation for a sender email domain.
+        Returns a dict with spf, dkim, dmarc status and warnings."""
+        domain = sender_email.split('@')[-1] if '@' in sender_email else sender_email
+        results: Dict = {
+            "domain": domain,
+            "spf": {"found": False, "record": None, "pass": False},
+            "dmarc": {"found": False, "record": None, "policy": None},
+            "mx": {"found": False, "servers": []},
+            "warnings": [],
+            "deliverability": "unknown"
+        }
+
+        if not self._dns_available:
+            results["warnings"].append("dnspython not installed – cannot validate DNS records")
+            return results
+
+        import dns.resolver
+
+        # --- SPF check ---
+        try:
+            txt_records = dns.resolver.resolve(domain, 'TXT')
+            for rdata in txt_records:
+                txt = rdata.to_text().strip('"')
+                if txt.startswith('v=spf1'):
+                    results["spf"]["found"] = True
+                    results["spf"]["record"] = txt
+                    # A strict SPF with -all or ~all may reject spoofed mail
+                    if '-all' in txt:
+                        results["spf"]["pass"] = False
+                        results["warnings"].append(
+                            f"SPF hard-fail (-all) on {domain}: spoofed mail will likely be rejected"
+                        )
+                    elif '~all' in txt:
+                        results["spf"]["pass"] = False
+                        results["warnings"].append(
+                            f"SPF soft-fail (~all) on {domain}: spoofed mail may land in spam"
+                        )
+                    elif '?all' in txt or '+all' in txt or 'all' not in txt:
+                        results["spf"]["pass"] = True
+                    break
+        except Exception as e:
+            self.logger.debug(f"SPF lookup failed for {domain}: {e}")
+
+        # --- DMARC check ---
+        try:
+            dmarc_domain = f"_dmarc.{domain}"
+            dmarc_records = dns.resolver.resolve(dmarc_domain, 'TXT')
+            for rdata in dmarc_records:
+                txt = rdata.to_text().strip('"')
+                if txt.startswith('v=DMARC1'):
+                    results["dmarc"]["found"] = True
+                    results["dmarc"]["record"] = txt
+                    # Extract policy
+                    policy_match = re.search(r'p=(\w+)', txt)
+                    if policy_match:
+                        policy = policy_match.group(1).lower()
+                        results["dmarc"]["policy"] = policy
+                        if policy == 'reject':
+                            results["warnings"].append(
+                                f"DMARC policy=reject on {domain}: spoofed mail will be rejected"
+                            )
+                        elif policy == 'quarantine':
+                            results["warnings"].append(
+                                f"DMARC policy=quarantine on {domain}: spoofed mail will land in spam"
+                            )
+                    break
+        except Exception as e:
+            self.logger.debug(f"DMARC lookup failed for {domain}: {e}")
+
+        # --- MX check ---
+        try:
+            mx_records = dns.resolver.resolve(domain, 'MX')
+            servers = [str(mx.exchange).rstrip('.') for mx in sorted(mx_records, key=lambda x: x.preference)]
+            results["mx"]["found"] = bool(servers)
+            results["mx"]["servers"] = servers
+        except Exception as e:
+            self.logger.debug(f"MX lookup failed for {domain}: {e}")
+
+        # --- Deliverability assessment ---
+        has_strict_spf = results["spf"]["found"] and not results["spf"]["pass"]
+        has_strict_dmarc = results["dmarc"]["found"] and results["dmarc"]["policy"] in ('reject', 'quarantine')
+
+        if has_strict_spf and has_strict_dmarc:
+            results["deliverability"] = "low"
+        elif has_strict_spf or has_strict_dmarc:
+            results["deliverability"] = "medium"
+        elif results["spf"]["found"] or results["dmarc"]["found"]:
+            results["deliverability"] = "medium-high"
+        else:
+            results["deliverability"] = "high"
+
+        return results
+
+    def print_validation_report(self, results: Dict):
+        """Pretty-print DNS validation results to console"""
+        domain = results["domain"]
+        print(f"\n🔍 DNS Validation Report for: {domain}")
+        print("─" * 50)
+
+        # SPF
+        if results["spf"]["found"]:
+            print(f"   📋 SPF: Found – {results['spf']['record']}")
+        else:
+            print(f"   📋 SPF: Not found (good for spoofing deliverability)")
+
+        # DMARC
+        if results["dmarc"]["found"]:
+            policy = results["dmarc"]["policy"] or "none"
+            print(f"   🛡️  DMARC: Found – policy={policy}")
+        else:
+            print(f"   🛡️  DMARC: Not found (good for spoofing deliverability)")
+
+        # MX
+        if results["mx"]["found"]:
+            print(f"   📡 MX Servers: {', '.join(results['mx']['servers'][:3])}")
+        else:
+            print(f"   📡 MX Servers: Not found")
+
+        # Deliverability
+        deliv = results["deliverability"]
+        deliv_icons = {"high": "🟢", "medium-high": "🟡", "medium": "🟠", "low": "🔴", "unknown": "⚪"}
+        print(f"   {deliv_icons.get(deliv, '⚪')} Deliverability: {deliv.upper()}")
+
+        # Warnings
+        if results["warnings"]:
+            print(f"\n   ⚠️  Warnings:")
+            for w in results["warnings"]:
+                print(f"      • {w}")
+        print()
 
 class ESTConfig:
     """Configuration manager for EST"""
@@ -490,6 +638,7 @@ class EST:
     def __init__(self):
         self.config = ESTConfig()
         self.scenarios = [EmailScenario(**s) for s in self.config.config['scenarios']]
+        self.dns_validator = DNSValidator(self.config.logger)
     
     def print_banner(self):
         """Print professional banner"""
@@ -502,8 +651,8 @@ class EST:
 ║    For Authorized Penetration Testing Only                   ║
 ║    Educational & Research Purposes                           ║
 ║                                                              ║
-║  Author: {__author__}                                      ║
-║  License: {__license__}                                                ║
+║  Author: {__author__:<52s}║
+║  License: {__license__:<51s}║
 ╚══════════════════════════════════════════════════════════════╝
 
 ⚠️  LEGAL NOTICE: This tool is for authorized security testing only.
@@ -542,147 +691,512 @@ class EST:
         
         print(f"📊 Total scenarios: {len(self.scenarios)}")
         print(f"🎯 Use 'est test <id> <target>' to run a scenario")
-    
-    def run_scenario(self, scenario_id: int, target: str, smtp_host: str = "localhost", smtp_port: int = 2525) -> bool:
-        """Run a specific spoofing scenario"""
+
+    # ------------------------------------------------------------------
+    # Unified email builder
+    # ------------------------------------------------------------------
+
+    def _build_email_message(
+        self,
+        from_email: str,
+        from_name: str,
+        to_email: str,
+        subject: str,
+        body: str,
+        html_body: Optional[str] = None,
+        attachments: Optional[List[str]] = None,
+        reply_to: Optional[str] = None,
+        in_reply_to: Optional[str] = None,
+        references: Optional[str] = None,
+        scenario: Optional[EmailScenario] = None,
+    ) -> str:
+        """Build a fully-featured MIME email message.
+
+        Supports plain text, HTML body, file attachments (PDF, HTML, etc.),
+        Reply-To header, and threading headers (In-Reply-To, References).
+        """
+        has_attachments = attachments and len(attachments) > 0
+
+        # Root message type depends on whether we have attachments
+        if has_attachments:
+            msg = MIMEMultipart('mixed')
+        else:
+            msg = MIMEMultipart('alternative')
+
+        # Standard headers
+        msg['From'] = f"{from_name} <{from_email}>"
+        msg['To'] = to_email
+        msg['Subject'] = Header(subject, 'utf-8')
+        msg['Date'] = formatdate(localtime=True)
+        sender_domain = from_email.split('@')[1] if '@' in from_email else 'localhost'
+        msg['Message-ID'] = email.utils.make_msgid(domain=sender_domain)
+        msg['X-Mailer'] = f"EST/{__version__}"
+
+        # Reply-To header
+        if reply_to:
+            msg['Reply-To'] = reply_to
+
+        # Threading headers
+        if in_reply_to:
+            msg['In-Reply-To'] = in_reply_to
+        if references:
+            msg['References'] = references
+
+        # Build disclaimer
+        if scenario:
+            disclaimer = (
+                f"\n────────────────────────────────────────────────────────────────\n"
+                f"This email was sent using EST (Email Spoofing Tool) for authorized\n"
+                f"security testing purposes. If you received this email unexpectedly,\n"
+                f"please contact your IT security team immediately.\n\n"
+                f"Test Details:\n"
+                f"• Scenario: {scenario.name}\n"
+                f"• Category: {scenario.category}\n"
+                f"• Severity: {scenario.severity}\n"
+                f"• Timestamp: {datetime.now().isoformat()}\n\n"
+                f"EST v{__version__} - Professional Email Security Assessment Framework\n"
+                f"────────────────────────────────────────────────────────────────"
+            )
+        else:
+            disclaimer = (
+                f"\n────────────────────────────────────────────────────────────────\n"
+                f"This email was sent using EST (Email Spoofing Tool) for authorized\n"
+                f"security testing purposes. If you received this email unexpectedly,\n"
+                f"please contact your IT security team immediately.\n\n"
+                f"EST v{__version__} - Professional Email Security Assessment Framework\n"
+                f"────────────────────────────────────────────────────────────────"
+            )
+
+        # Body parts (text + optional HTML)
+        plain_text = body + disclaimer
+
+        if has_attachments:
+            # Wrap body inside a multipart/alternative sub-part
+            body_part = MIMEMultipart('alternative')
+            body_part.attach(MIMEText(plain_text, 'plain', 'utf-8'))
+            if html_body:
+                body_part.attach(MIMEText(html_body, 'html', 'utf-8'))
+            msg.attach(body_part)
+        else:
+            msg.attach(MIMEText(plain_text, 'plain', 'utf-8'))
+            if html_body:
+                msg.attach(MIMEText(html_body, 'html', 'utf-8'))
+
+        # Attachments
+        if has_attachments:
+            for filepath in attachments:
+                self._attach_file(msg, filepath)
+
+        return msg.as_string()
+
+    def _attach_file(self, msg: MIMEMultipart, filepath: str):
+        """Attach a file (PDF, HTML, or any supported type) to a MIME message."""
+        path = Path(filepath)
+        if not path.is_file():
+            self.config.logger.warning(f"Attachment not found, skipping: {filepath}")
+            return
+
+        content_type, _ = mimetypes.guess_type(str(path))
+        if content_type is None:
+            content_type = 'application/octet-stream'
+
+        maintype, subtype = content_type.split('/', 1)
+
+        with open(path, 'rb') as fp:
+            file_data = fp.read()
+
+        if maintype == 'text':
+            attachment = MIMEText(file_data.decode('utf-8', errors='replace'), _subtype=subtype)
+        elif maintype == 'application':
+            attachment = MIMEApplication(file_data, _subtype=subtype)
+        else:
+            attachment = MIMEBase(maintype, subtype)
+            attachment.set_payload(file_data)
+            encoders.encode_base64(attachment)
+
+        attachment.add_header(
+            'Content-Disposition', 'attachment', filename=path.name
+        )
+        msg.attach(attachment)
+        self.config.logger.info(f"📎 Attached: {path.name} ({content_type})")
+
+    # ------------------------------------------------------------------
+    # Sending helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_targets(self, target: Optional[str] = None,
+                         target_list: Optional[str] = None) -> List[str]:
+        """Resolve a list of target email addresses from CLI args.
+
+        Supports:
+        - Single email via *target*
+        - Comma-separated emails via *target*
+        - A file path (one email per line) via *target_list*
+        """
+        targets: List[str] = []
+
+        if target:
+            # Support comma-separated targets
+            for addr in target.split(','):
+                addr = addr.strip()
+                if addr and '@' in addr:
+                    targets.append(addr)
+
+        if target_list:
+            tl_path = Path(target_list)
+            if tl_path.is_file():
+                with open(tl_path, 'r') as f:
+                    for line in f:
+                        addr = line.strip()
+                        if addr and '@' in addr and not addr.startswith('#'):
+                            targets.append(addr)
+                self.config.logger.info(f"Loaded {len(targets)} targets from {target_list}")
+            else:
+                print(f"❌ Target list file not found: {target_list}")
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique: List[str] = []
+        for t in targets:
+            if t not in seen:
+                seen.add(t)
+                unique.append(t)
+        return unique
+
+    def _load_html_body(self, html_body: Optional[str] = None,
+                        body_file: Optional[str] = None) -> Optional[str]:
+        """Load HTML body content from a raw string or file."""
+        if html_body:
+            return html_body
+        if body_file:
+            bf_path = Path(body_file)
+            if bf_path.is_file():
+                with open(bf_path, 'r', encoding='utf-8') as f:
+                    return f.read()
+            else:
+                print(f"⚠️  HTML body file not found: {body_file}")
+        return None
+
+    # ------------------------------------------------------------------
+    # Scenario runner
+    # ------------------------------------------------------------------
+
+    def run_scenario(self, scenario_id: int, target: str,
+                     smtp_host: str = "localhost", smtp_port: int = 2525,
+                     reply_to: Optional[str] = None,
+                     in_reply_to: Optional[str] = None,
+                     references: Optional[str] = None,
+                     attachments: Optional[List[str]] = None,
+                     html_body: Optional[str] = None,
+                     body_file: Optional[str] = None,
+                     target_list: Optional[str] = None,
+                     delay: float = 0,
+                     validate_dns: bool = True) -> bool:
+        """Run a specific spoofing scenario against one or more targets"""
         try:
             scenario = self.scenarios[scenario_id - 1]
         except IndexError:
             print(f"❌ Invalid scenario ID: {scenario_id}")
             print(f"💡 Available scenarios: 1-{len(self.scenarios)}")
             return False
-        
+
+        # Resolve targets
+        targets = self._resolve_targets(target, target_list)
+        if not targets:
+            print("❌ No valid target email addresses provided")
+            return False
+
+        # DNS validation for sender domain
+        if validate_dns:
+            dns_results = self.dns_validator.validate_sender_domain(scenario.from_email)
+            self.dns_validator.print_validation_report(dns_results)
+
+        # Load optional HTML body
+        resolved_html = self._load_html_body(html_body, body_file)
+
         print(f"\n🎯 Executing Email Spoofing Test")
         print(f"─" * 40)
         print(f"📧 Scenario: {scenario.name}")
         print(f"🏷️  Category: {scenario.category}")
         print(f"⚠️  Severity: {scenario.severity}")
         print(f"📤 Spoofed From: {scenario.from_name} <{scenario.from_email}>")
-        print(f"📥 Target: {target}")
+        print(f"📥 Targets: {len(targets)} recipient(s)")
+        if reply_to:
+            print(f"↩️  Reply-To: {reply_to}")
+        if in_reply_to:
+            print(f"🧵 Thread: In-Reply-To set")
+        if attachments:
+            print(f"📎 Attachments: {len(attachments)} file(s)")
+        if resolved_html:
+            print(f"🌐 HTML Body: enabled")
         print(f"📡 SMTP Server: {smtp_host}:{smtp_port}")
+        if delay > 0 and len(targets) > 1:
+            print(f"⏱️  Throttle: {delay}s between sends")
         print(f"🕐 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print()
-        
-        try:
-            # Create professional email content using MIME
-            email_content = self._create_mime_email(scenario, target)
-            
-            # Send via SMTP
-            print("🚀 Initiating SMTP connection...")
-            server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
-            
-            print("📤 Sending spoofed email...")
-            server.sendmail(scenario.from_email, [target], email_content)
-            server.quit()
-            
-            print("✅ Email spoofing test completed successfully!")
-            print(f"📋 Check target inbox: {target}")
-            
-            # Log the test
-            result = TestResult(
-                timestamp=datetime.now().isoformat(),
-                test_type="scenario_test",
-                scenario=scenario.name,
-                target=target,
-                from_email=scenario.from_email,
-                success=True,
-                details={
-                    "category": scenario.category,
-                    "severity": scenario.severity,
-                    "smtp_server": f"{smtp_host}:{smtp_port}"
-                }
-            )
-            
-            self._log_test_result(result)
-            return True
-            
-        except Exception as e:
-            print(f"❌ Email spoofing test failed: {e}")
-            print(f"💡 Verify SMTP server is running: est server --port {smtp_port}")
-            
-            # Log failed test
-            result = TestResult(
-                timestamp=datetime.now().isoformat(),
-                test_type="scenario_test",
-                scenario=scenario.name,
-                target=target,
-                from_email=scenario.from_email,
-                success=False,
-                details={
-                    "error": str(e),
-                    "smtp_server": f"{smtp_host}:{smtp_port}"
-                }
-            )
-            
-            self._log_test_result(result)
+
+        success_count = 0
+        for idx, tgt in enumerate(targets, 1):
+            try:
+                email_content = self._build_email_message(
+                    from_email=scenario.from_email,
+                    from_name=scenario.from_name,
+                    to_email=tgt,
+                    subject=scenario.subject,
+                    body=scenario.body,
+                    html_body=resolved_html,
+                    attachments=attachments,
+                    reply_to=reply_to,
+                    in_reply_to=in_reply_to,
+                    references=references,
+                    scenario=scenario,
+                )
+
+                if len(targets) > 1:
+                    print(f"🚀 [{idx}/{len(targets)}] Sending to {tgt}...")
+                else:
+                    print("🚀 Initiating SMTP connection...")
+
+                server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
+                server.sendmail(scenario.from_email, [tgt], email_content)
+                server.quit()
+
+                success_count += 1
+                if len(targets) == 1:
+                    print("✅ Email spoofing test completed successfully!")
+                    print(f"📋 Check target inbox: {tgt}")
+
+                # Log the test
+                self._log_test_result(TestResult(
+                    timestamp=datetime.now().isoformat(),
+                    test_type="scenario_test",
+                    scenario=scenario.name,
+                    target=tgt,
+                    from_email=scenario.from_email,
+                    success=True,
+                    details={
+                        "category": scenario.category,
+                        "severity": scenario.severity,
+                        "smtp_server": f"{smtp_host}:{smtp_port}",
+                        "reply_to": reply_to,
+                        "has_attachments": bool(attachments),
+                        "has_html": bool(resolved_html),
+                        "threaded": bool(in_reply_to),
+                    }
+                ))
+
+                # Throttle between sends
+                if delay > 0 and idx < len(targets):
+                    time.sleep(delay)
+
+            except Exception as e:
+                print(f"❌ Failed for {tgt}: {e}")
+                self._log_test_result(TestResult(
+                    timestamp=datetime.now().isoformat(),
+                    test_type="scenario_test",
+                    scenario=scenario.name,
+                    target=tgt,
+                    from_email=scenario.from_email,
+                    success=False,
+                    details={"error": str(e), "smtp_server": f"{smtp_host}:{smtp_port}"}
+                ))
+
+        if len(targets) > 1:
+            print(f"\n📊 Bulk send complete: {success_count}/{len(targets)} succeeded")
+
+        return success_count > 0
+
+    # ------------------------------------------------------------------
+    # Custom test runner
+    # ------------------------------------------------------------------
+
+    def run_custom_test(self, from_email: str, from_name: str, subject: str,
+                        body: str, target: str,
+                        smtp_host: str = "localhost", smtp_port: int = 2525,
+                        reply_to: Optional[str] = None,
+                        in_reply_to: Optional[str] = None,
+                        references: Optional[str] = None,
+                        attachments: Optional[List[str]] = None,
+                        html_body: Optional[str] = None,
+                        body_file: Optional[str] = None,
+                        target_list: Optional[str] = None,
+                        delay: float = 0,
+                        validate_dns: bool = True) -> bool:
+        """Run custom spoofing test with full feature set"""
+
+        # Resolve targets
+        targets = self._resolve_targets(target, target_list)
+        if not targets:
+            print("❌ No valid target email addresses provided")
             return False
-    
-    def run_custom_test(self, from_email: str, from_name: str, subject: str, 
-                       body: str, target: str, smtp_host: str = "localhost", 
-                       smtp_port: int = 2525) -> bool:
-        """Run custom spoofing test"""
+
+        # DNS validation
+        if validate_dns:
+            dns_results = self.dns_validator.validate_sender_domain(from_email)
+            self.dns_validator.print_validation_report(dns_results)
+
+        # Load optional HTML body
+        resolved_html = self._load_html_body(html_body, body_file)
+
         print(f"\n🎯 Executing Custom Email Spoofing Test")
         print(f"─" * 45)
         print(f"📤 Spoofed From: {from_name} <{from_email}>")
-        print(f"📥 Target: {target}")
+        print(f"📥 Targets: {len(targets)} recipient(s)")
         print(f"📋 Subject: {subject}")
+        if reply_to:
+            print(f"↩️  Reply-To: {reply_to}")
+        if in_reply_to:
+            print(f"🧵 Thread: In-Reply-To set")
+        if attachments:
+            print(f"📎 Attachments: {len(attachments)} file(s)")
+        if resolved_html:
+            print(f"🌐 HTML Body: enabled")
         print(f"📡 SMTP Server: {smtp_host}:{smtp_port}")
+        if delay > 0 and len(targets) > 1:
+            print(f"⏱️  Throttle: {delay}s between sends")
         print(f"🕐 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print()
-        
-        try:
-            # Create MIME email with proper encoding
-            email_content = self._create_custom_mime_email(from_email, from_name, subject, body, target)
-            
-            print("🚀 Initiating SMTP connection...")
-            server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
-            
-            print("📤 Sending custom spoofed email...")
-            server.sendmail(from_email, [target], email_content)
-            server.quit()
-            
-            print("✅ Custom email spoofing test completed successfully!")
-            print(f"📋 Check target inbox: {target}")
-            
-            # Log the test
-            result = TestResult(
-                timestamp=datetime.now().isoformat(),
-                test_type="custom_test",
-                scenario="custom",
-                target=target,
-                from_email=from_email,
-                success=True,
-                details={
-                    "from_name": from_name,
-                    "subject": subject,
-                    "body_length": len(body),
-                    "smtp_server": f"{smtp_host}:{smtp_port}"
-                }
+
+        success_count = 0
+        for idx, tgt in enumerate(targets, 1):
+            try:
+                email_content = self._build_email_message(
+                    from_email=from_email,
+                    from_name=from_name,
+                    to_email=tgt,
+                    subject=subject,
+                    body=body,
+                    html_body=resolved_html,
+                    attachments=attachments,
+                    reply_to=reply_to,
+                    in_reply_to=in_reply_to,
+                    references=references,
+                )
+
+                if len(targets) > 1:
+                    print(f"🚀 [{idx}/{len(targets)}] Sending to {tgt}...")
+                else:
+                    print("🚀 Initiating SMTP connection...")
+
+                server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
+                server.sendmail(from_email, [tgt], email_content)
+                server.quit()
+
+                success_count += 1
+                if len(targets) == 1:
+                    print("✅ Custom email spoofing test completed successfully!")
+                    print(f"📋 Check target inbox: {tgt}")
+
+                self._log_test_result(TestResult(
+                    timestamp=datetime.now().isoformat(),
+                    test_type="custom_test",
+                    scenario="custom",
+                    target=tgt,
+                    from_email=from_email,
+                    success=True,
+                    details={
+                        "from_name": from_name,
+                        "subject": subject,
+                        "body_length": len(body),
+                        "smtp_server": f"{smtp_host}:{smtp_port}",
+                        "reply_to": reply_to,
+                        "has_attachments": bool(attachments),
+                        "has_html": bool(resolved_html),
+                        "threaded": bool(in_reply_to),
+                    }
+                ))
+
+                if delay > 0 and idx < len(targets):
+                    time.sleep(delay)
+
+            except Exception as e:
+                print(f"❌ Failed for {tgt}: {e}")
+                self._log_test_result(TestResult(
+                    timestamp=datetime.now().isoformat(),
+                    test_type="custom_test",
+                    scenario="custom",
+                    target=tgt,
+                    from_email=from_email,
+                    success=False,
+                    details={"error": str(e), "smtp_server": f"{smtp_host}:{smtp_port}"}
+                ))
+
+        if len(targets) > 1:
+            print(f"\n📊 Bulk send complete: {success_count}/{len(targets)} succeeded")
+
+        return success_count > 0
+
+    # ------------------------------------------------------------------
+    # Bulk command (convenience wrapper)
+    # ------------------------------------------------------------------
+
+    def run_bulk_test(self, scenario_id: Optional[int], target_list: str,
+                      smtp_host: str = "localhost", smtp_port: int = 2525,
+                      delay: float = 1.0,
+                      reply_to: Optional[str] = None,
+                      in_reply_to: Optional[str] = None,
+                      references: Optional[str] = None,
+                      attachments: Optional[List[str]] = None,
+                      html_body: Optional[str] = None,
+                      body_file: Optional[str] = None,
+                      from_email: Optional[str] = None,
+                      from_name: Optional[str] = None,
+                      subject: Optional[str] = None,
+                      body: Optional[str] = None,
+                      validate_dns: bool = True) -> bool:
+        """Run a bulk spoofing campaign against a list of targets."""
+        if scenario_id is not None:
+            return self.run_scenario(
+                scenario_id=scenario_id,
+                target="",
+                smtp_host=smtp_host,
+                smtp_port=smtp_port,
+                reply_to=reply_to,
+                in_reply_to=in_reply_to,
+                references=references,
+                attachments=attachments,
+                html_body=html_body,
+                body_file=body_file,
+                target_list=target_list,
+                delay=delay,
+                validate_dns=validate_dns,
             )
-            
-            self._log_test_result(result)
-            return True
-            
-        except Exception as e:
-            print(f"❌ Custom email spoofing test failed: {e}")
-            
-            # Log failed test
-            result = TestResult(
-                timestamp=datetime.now().isoformat(),
-                test_type="custom_test",
-                scenario="custom",
-                target=target,
+        elif from_email and from_name and subject and body:
+            return self.run_custom_test(
                 from_email=from_email,
-                success=False,
-                details={
-                    "error": str(e),
-                    "smtp_server": f"{smtp_host}:{smtp_port}"
-                }
+                from_name=from_name,
+                subject=subject,
+                body=body,
+                target="",
+                smtp_host=smtp_host,
+                smtp_port=smtp_port,
+                reply_to=reply_to,
+                in_reply_to=in_reply_to,
+                references=references,
+                attachments=attachments,
+                html_body=html_body,
+                body_file=body_file,
+                target_list=target_list,
+                delay=delay,
+                validate_dns=validate_dns,
             )
-            
-            self._log_test_result(result)
+        else:
+            print("❌ Bulk mode requires either --scenario or all of --from-email, --from-name, --subject, --body")
             return False
-    
+
+    # ------------------------------------------------------------------
+    # DNS check command
+    # ------------------------------------------------------------------
+
+    def check_dns(self, domain_or_email: str):
+        """Run DNS validation on a domain or sender email and print results."""
+        results = self.dns_validator.validate_sender_domain(domain_or_email)
+        self.dns_validator.print_validation_report(results)
+
+    # ------------------------------------------------------------------
+    # Logs & reporting (unchanged logic, kept for completeness)
+    # ------------------------------------------------------------------
+
     def show_logs(self, lines: int = 20):
         """Display recent test logs"""
         if not self.config.log_file.exists():
@@ -895,131 +1409,11 @@ class EST:
             print(f"   • {rec}")
         if len(report['recommendations']) > 3:
             print(f"   ... and {len(report['recommendations']) - 3} more")
-    
-    def _create_mime_email(self, scenario: EmailScenario, target: str) -> str:
-        """Create professional MIME email content with proper encoding"""
-        try:
-            # Create MIME message
-            msg = MIMEMultipart('alternative')
-            
-            # Set headers with proper encoding
-            msg['From'] = f"{scenario.from_name} <{scenario.from_email}>"
-            msg['To'] = target
-            msg['Subject'] = Header(scenario.subject, 'utf-8')
-            msg['Date'] = formatdate(localtime=True)
-            msg['Message-ID'] = email.utils.make_msgid(domain=scenario.from_email.split('@')[1])
-            
-            # Create email body with disclaimer
-            email_body = f"""{scenario.body}
 
-────────────────────────────────────────────────────────────────
-This email was sent using EST (Email Spoofing Tool) for authorized
-security testing purposes. If you received this email unexpectedly,
-please contact your IT security team immediately.
+    # ------------------------------------------------------------------
+    # Internal logging
+    # ------------------------------------------------------------------
 
-Test Details:
-• Scenario: {scenario.name}
-• Category: {scenario.category}
-• Severity: {scenario.severity}
-• Timestamp: {datetime.now().isoformat()}
-
-EST v{__version__} - Professional Email Security Assessment Framework
-────────────────────────────────────────────────────────────────"""
-            
-            # Create text part with proper encoding
-            text_part = MIMEText(email_body, 'plain', 'utf-8')
-            msg.attach(text_part)
-            
-            return msg.as_string()
-            
-        except Exception as e:
-            self.config.logger.error(f"MIME email creation failed: {e}")
-            # Fallback to simple string method
-            return self._create_simple_email(scenario, target)
-    
-    def _create_custom_mime_email(self, from_email: str, from_name: str, subject: str, body: str, target: str) -> str:
-        """Create custom MIME email with proper encoding"""
-        try:
-            # Create MIME message
-            msg = MIMEMultipart('alternative')
-            
-            # Set headers with proper encoding
-            msg['From'] = f"{from_name} <{from_email}>"
-            msg['To'] = target
-            msg['Subject'] = Header(subject, 'utf-8')
-            msg['Date'] = formatdate(localtime=True)
-            msg['Message-ID'] = email.utils.make_msgid(domain=from_email.split('@')[1])
-            
-            # Create email body with disclaimer
-            email_body = f"""{body}
-
-────────────────────────────────────────────────────────────────
-This email was sent using EST (Email Spoofing Tool) for authorized
-security testing purposes. If you received this email unexpectedly,
-please contact your IT security team immediately.
-
-EST v{__version__} - Professional Email Security Assessment Framework
-────────────────────────────────────────────────────────────────"""
-            
-            # Create text part with proper encoding
-            text_part = MIMEText(email_body, 'plain', 'utf-8')
-            msg.attach(text_part)
-            
-            return msg.as_string()
-            
-        except Exception as e:
-            self.config.logger.error(f"Custom MIME email creation failed: {e}")
-            # Fallback to simple string method
-            return self._create_simple_custom_email(from_email, from_name, subject, body, target)
-    
-    def _create_simple_email(self, scenario: EmailScenario, target: str) -> str:
-        """Fallback method to create simple email content"""
-        return f"""From: {scenario.from_name} <{scenario.from_email}>
-To: {target}
-Subject: {scenario.subject}
-Date: {datetime.now().strftime('%a, %d %b %Y %H:%M:%S %z')}
-Message-ID: <{int(time.time())}.{hash(target) % 10000}@{scenario.from_email.split('@')[1]}>
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-
-{scenario.body}
-
-────────────────────────────────────────────────────────────────
-This email was sent using EST (Email Spoofing Tool) for authorized
-security testing purposes. If you received this email unexpectedly,
-please contact your IT security team immediately.
-
-Test Details:
-• Scenario: {scenario.name}
-• Category: {scenario.category}
-• Severity: {scenario.severity}
-• Timestamp: {datetime.now().isoformat()}
-
-EST v{__version__} - Professional Email Security Assessment Framework
-────────────────────────────────────────────────────────────────
-"""
-    
-    def _create_simple_custom_email(self, from_email: str, from_name: str, subject: str, body: str, target: str) -> str:
-        """Fallback method to create simple custom email content"""
-        return f"""From: {from_name} <{from_email}>
-To: {target}
-Subject: {subject}
-Date: {datetime.now().strftime('%a, %d %b %Y %H:%M:%S %z')}
-Message-ID: <{int(time.time())}.{hash(target) % 10000}@{from_email.split('@')[1]}>
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-
-{body}
-
-────────────────────────────────────────────────────────────────
-This email was sent using EST (Email Spoofing Tool) for authorized
-security testing purposes. If you received this email unexpectedly,
-please contact your IT security team immediately.
-
-EST v{__version__} - Professional Email Security Assessment Framework
-────────────────────────────────────────────────────────────────
-"""
-    
     def _log_test_result(self, result: TestResult):
         """Log test result"""
         try:
@@ -1041,6 +1435,32 @@ EST v{__version__} - Professional Email Security Assessment Framework
         except Exception as e:
             self.config.logger.error(f"Failed to log test result: {e}")
 
+def _add_common_send_args(parser: argparse.ArgumentParser):
+    """Add common arguments shared by test, custom, and bulk subcommands."""
+    parser.add_argument('--smtp-host', default='localhost',
+                        help='SMTP server hostname (default: localhost)')
+    parser.add_argument('--smtp-port', type=int, default=2525,
+                        help='SMTP server port (default: 2525)')
+    parser.add_argument('--reply-to', default=None,
+                        help='Reply-To email address')
+    parser.add_argument('--in-reply-to', default=None,
+                        help='Message-ID to thread as a reply (In-Reply-To header)')
+    parser.add_argument('--references', default=None,
+                        help='Message-ID references for threading (References header)')
+    parser.add_argument('--attachment', action='append', default=None, dest='attachments',
+                        help='File path to attach (PDF, HTML, etc.). Repeat for multiple files.')
+    parser.add_argument('--html-body', default=None,
+                        help='Raw HTML string to use as email body (alternative part)')
+    parser.add_argument('--body-file', default=None,
+                        help='Path to an HTML file whose contents will be used as email body')
+    parser.add_argument('--target-list', default=None,
+                        help='Path to a file containing target emails (one per line)')
+    parser.add_argument('--delay', type=float, default=0,
+                        help='Seconds to wait between sends for bulk/multiple targets (default: 0)')
+    parser.add_argument('--no-dns-check', action='store_true', default=False,
+                        help='Skip DNS (SPF/DKIM/DMARC) validation of sender domain')
+
+
 def main():
     """Main application entry point"""
     parser = argparse.ArgumentParser(
@@ -1052,11 +1472,19 @@ Examples:
   est server --port 2525                    Start SMTP testing server
   est list                                  List available spoofing scenarios
   est test 1 target@company.com             Run CEO fraud scenario
+  est test 1 a@x.com,b@x.com --delay 2     Bulk scenario with throttle
   est custom --from-email "ceo@company.com" \\
          --from-name "John Smith" \\
          --subject "Urgent Request" \\
          --body "Please handle this" \\
-         --target "user@company.com"        Run custom spoofing test
+         --target "user@company.com" \\
+         --reply-to "real@attacker.com" \\
+         --attachment report.pdf \\
+         --html-body "<h1>Urgent</h1>"      Custom test with all features
+  est bulk --scenario 1 \\
+         --target-list targets.txt \\
+         --delay 2                          Bulk scenario against list
+  est dns-check ceo@company.com             Check sender DNS records
   est logs --lines 50                       View recent test logs
   est report                                Generate assessment report
 
@@ -1086,11 +1514,9 @@ Author: {__author__} | License: {__license__}
     test_parser = subparsers.add_parser('test', help='Run spoofing scenario')
     test_parser.add_argument('scenario', type=int, 
                             help='Scenario ID (use "list" to see available)')
-    test_parser.add_argument('target', help='Target email address')
-    test_parser.add_argument('--smtp-host', default='localhost',
-                            help='SMTP server hostname (default: localhost)')
-    test_parser.add_argument('--smtp-port', type=int, default=2525,
-                            help='SMTP server port (default: 2525)')
+    test_parser.add_argument('target', nargs='?', default='',
+                            help='Target email address (comma-separated for multiple)')
+    _add_common_send_args(test_parser)
     
     # Custom test command
     custom_parser = subparsers.add_parser('custom', help='Run custom spoofing test')
@@ -1101,14 +1527,31 @@ Author: {__author__} | License: {__license__}
     custom_parser.add_argument('--subject', required=True,
                               help='Email subject line')
     custom_parser.add_argument('--body', required=True,
-                              help='Email body content')
-    custom_parser.add_argument('--target', required=True,
-                              help='Target email address')
-    custom_parser.add_argument('--smtp-host', default='localhost',
-                              help='SMTP server hostname (default: localhost)')
-    custom_parser.add_argument('--smtp-port', type=int, default=2525,
-                              help='SMTP server port (default: 2525)')
-    
+                              help='Email body content (plain text)')
+    custom_parser.add_argument('--target', default='',
+                              help='Target email address (comma-separated for multiple)')
+    _add_common_send_args(custom_parser)
+
+    # Bulk command
+    bulk_parser = subparsers.add_parser('bulk', help='Bulk send spoofed emails to a list of targets')
+    bulk_group = bulk_parser.add_mutually_exclusive_group()
+    bulk_group.add_argument('--scenario', type=int, default=None,
+                            help='Scenario ID to use for bulk send')
+    bulk_group.add_argument('--from-email', default=None,
+                            help='Spoofed sender email for custom bulk')
+    bulk_parser.add_argument('--from-name', default=None,
+                            help='Spoofed sender display name (required for custom bulk)')
+    bulk_parser.add_argument('--subject', default=None,
+                            help='Email subject (required for custom bulk)')
+    bulk_parser.add_argument('--body', default=None,
+                            help='Email body (required for custom bulk)')
+    _add_common_send_args(bulk_parser)
+
+    # DNS check command
+    dns_parser = subparsers.add_parser('dns-check',
+                                       help='Check SPF/DKIM/DMARC records for a sender domain')
+    dns_parser.add_argument('sender', help='Sender email address or domain to check')
+
     # Logs command
     logs_parser = subparsers.add_parser('logs', help='View test logs')
     logs_parser.add_argument('--lines', type=int, default=20,
@@ -1150,16 +1593,73 @@ Author: {__author__} | License: {__license__}
     
     elif args.command == 'test':
         est.print_banner()
-        success = est.run_scenario(args.scenario, args.target, args.smtp_host, args.smtp_port)
+        success = est.run_scenario(
+            scenario_id=args.scenario,
+            target=args.target,
+            smtp_host=args.smtp_host,
+            smtp_port=args.smtp_port,
+            reply_to=args.reply_to,
+            in_reply_to=args.in_reply_to,
+            references=args.references,
+            attachments=args.attachments,
+            html_body=args.html_body,
+            body_file=args.body_file,
+            target_list=args.target_list,
+            delay=args.delay,
+            validate_dns=not args.no_dns_check,
+        )
         sys.exit(0 if success else 1)
     
     elif args.command == 'custom':
         est.print_banner()
         success = est.run_custom_test(
-            args.from_email, args.from_name, args.subject, 
-            args.body, args.target, args.smtp_host, args.smtp_port
+            from_email=args.from_email,
+            from_name=args.from_name,
+            subject=args.subject,
+            body=args.body,
+            target=args.target,
+            smtp_host=args.smtp_host,
+            smtp_port=args.smtp_port,
+            reply_to=args.reply_to,
+            in_reply_to=args.in_reply_to,
+            references=args.references,
+            attachments=args.attachments,
+            html_body=args.html_body,
+            body_file=args.body_file,
+            target_list=args.target_list,
+            delay=args.delay,
+            validate_dns=not args.no_dns_check,
         )
         sys.exit(0 if success else 1)
+
+    elif args.command == 'bulk':
+        est.print_banner()
+        if not args.target_list:
+            print("❌ --target-list is required for bulk command")
+            sys.exit(1)
+        success = est.run_bulk_test(
+            scenario_id=args.scenario,
+            target_list=args.target_list,
+            smtp_host=args.smtp_host,
+            smtp_port=args.smtp_port,
+            delay=args.delay if args.delay > 0 else 1.0,
+            reply_to=args.reply_to,
+            in_reply_to=args.in_reply_to,
+            references=args.references,
+            attachments=args.attachments,
+            html_body=args.html_body,
+            body_file=args.body_file,
+            from_email=args.from_email,
+            from_name=args.from_name,
+            subject=args.subject,
+            body=args.body,
+            validate_dns=not args.no_dns_check,
+        )
+        sys.exit(0 if success else 1)
+
+    elif args.command == 'dns-check':
+        est.print_banner()
+        est.check_dns(args.sender)
     
     elif args.command == 'logs':
         est.print_banner()
