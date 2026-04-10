@@ -139,20 +139,49 @@ install_dependencies() {
         print_info "Using apt package manager (Debian/Ubuntu/Kali)"
         sudo apt update
         
-        # Install core dependencies
+        # Install core dependencies (safe packages first)
         sudo apt install -y \
             python3-dev \
             python3-pip \
             python3-setuptools \
             python3-wheel \
-            python3-venv \
             telnet \
-            dnsutils \
             curl \
             git
         
+        # Handle dnsutils / bind9-dnsutils (may conflict on some systems)
+        if ! sudo apt install -y dnsutils 2>/dev/null; then
+            print_warning "dnsutils meta-package not installable, trying bind9-dnsutils..."
+            sudo apt install -y bind9-dnsutils 2>/dev/null || \
+                print_warning "DNS utils not installed (dig/nslookup may be unavailable)"
+        fi
+        
+        # Handle python3-venv: use versioned package for Python 3.12+
+        # On mixed-Python systems (e.g. Kali with Python 3.13 but python3-venv
+        # linked to 3.11) the generic python3-venv meta-package will fail.
+        if [ "$USE_VENV" = true ]; then
+            VENV_PKG="python3.${PYTHON_MINOR}-venv"
+            if sudo apt install -y "$VENV_PKG" 2>/dev/null; then
+                print_status "Installed versioned venv package: $VENV_PKG"
+            elif sudo apt install -y python3-venv 2>/dev/null; then
+                print_status "Installed python3-venv"
+            else
+                print_warning "Could not install venv via apt, trying ensurepip fallback..."
+                # Python 3.12+ ships venv in the stdlib; ensurepip is the
+                # only extra piece. If the versioned dev package is present
+                # the built-in venv module will work.
+                if python3 -c "import venv" 2>/dev/null; then
+                    print_status "Python venv module already available (built-in)"
+                else
+                    print_error "Cannot obtain python3 venv support."
+                    print_info "Try: sudo apt install python3.${PYTHON_MINOR}-venv"
+                    exit 1
+                fi
+            fi
+        fi
+        
         # Install Python DNS library via apt (preferred for system packages)
-        if sudo apt install -y python3-dnspython; then
+        if sudo apt install -y python3-dnspython 2>/dev/null; then
             print_status "DNS library installed via system package manager"
             SYSTEM_DNS_INSTALLED=true
         else
