@@ -32,7 +32,7 @@ import mimetypes
 import hashlib
 import uuid
 import base64
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import logging
@@ -115,7 +115,7 @@ class LicenseManager:
         if machine_id is None:
             machine_id = LicenseManager._get_machine_id()
 
-        expires = (datetime.now(tz=None) + timedelta(days=days_valid)).isoformat()
+        expires = (datetime.now(timezone.utc) + timedelta(days=days_valid)).isoformat()
 
         payload = {
             "machine_id": machine_id,
@@ -185,6 +185,9 @@ class LicenseManager:
         # Expiration
         try:
             expires_dt = datetime.fromisoformat(payload["expires"])
+            # Ensure timezone-aware comparison
+            if expires_dt.tzinfo is None:
+                expires_dt = expires_dt.replace(tzinfo=timezone.utc)
         except Exception:
             result["error"] = "Invalid expiration date in key"
             return result
@@ -192,7 +195,7 @@ class LicenseManager:
         result["expires"] = payload["expires"]
         result["tier"] = payload["tier"]
 
-        if datetime.now(tz=None) > expires_dt:
+        if datetime.now(timezone.utc) > expires_dt:
             result["error"] = f"License expired on {payload['expires']}"
             return result
 

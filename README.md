@@ -755,9 +755,9 @@ For common issues:
 
 <div align="center">
 
-**EST v3.0.0** - Professional Email Security Assessment Framework
+**EST v3.1.0** - Professional Email Security Assessment Framework
 
-Compatible with Python 3.8+ including Python 3.13+ and Kali Linux
+Compatible with Python 3.8+ including Python 3.12+ / 3.13+ and Kali Linux
 
 Made with ❤️ by paris
 
