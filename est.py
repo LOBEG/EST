@@ -797,7 +797,7 @@ class EST:
             return
 
         content_type, _ = mimetypes.guess_type(str(path))
-        if content_type is None:
+        if content_type is None or '/' not in content_type:
             content_type = 'application/octet-stream'
 
         maintype, subtype = content_type.split('/', 1)
