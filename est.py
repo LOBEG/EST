@@ -1990,7 +1990,7 @@ class EST:
 
                     except smtplib.SMTPResponseException as e:
                         # If server explicitly rejected (5xx), no point retrying same port
-                        if e.smtp_code >= 500 and e.smtp_code < 600:
+                        if 500 <= e.smtp_code < 600:
                             self.config.logger.warning(
                                 f"❌ Permanent rejection {mx_server}:{port}: "
                                 f"{e.smtp_code} {str(e.smtp_error)[:60]}"
