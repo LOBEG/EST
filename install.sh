@@ -785,7 +785,7 @@ _est_completion() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="server list test custom bulk dns-check logs report license"
+    commands="server list test custom bulk dns-check logs report license interactive"
     
     case ${prev} in
         est)
