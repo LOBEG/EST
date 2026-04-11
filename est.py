@@ -2252,8 +2252,8 @@ class EST:
 
         direct, auto = self._interactive_delivery_mode()
 
-        workers_str = self._interactive_prompt("Concurrent workers", "4")
-        workers = int(workers_str) if workers_str.isdigit() else 4
+        workers_str = self._interactive_prompt("Concurrent workers", "1")
+        workers = int(workers_str) if workers_str.isdigit() else 1
         delay_str = self._interactive_prompt("Delay between sends (seconds)", "1")
         try:
             delay = float(delay_str)
