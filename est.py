@@ -787,30 +787,43 @@ class SMTPTestServer:
         return success_count > 0
     
     def _relay_email(self, mail_from: str, rcpt_to: str, email_data: str) -> bool:
-        """Relay email to destination"""
+        """Relay email to destination with proper EHLO and STARTTLS for deliverability."""
         try:
             domain = rcpt_to.split('@')[1]
+            sender_domain = mail_from.split('@')[1] if '@' in mail_from else 'localhost'
             mx_servers = self._get_mx_servers(domain)
             
             self.config.logger.info(f"Attempting relay to {rcpt_to} via {len(mx_servers)} MX servers")
             
             for mx_server in mx_servers:
-                try:
-                    server = smtplib.SMTP(mx_server, 25, timeout=15)
-                    server.set_debuglevel(0)
-                    
-                    # Ensure proper encoding
-                    full_email = f"From: {mail_from}\r\nTo: {rcpt_to}\r\n{email_data}"
-                    full_email_bytes = full_email.encode('utf-8')
-                    server.sendmail(mail_from, [rcpt_to], full_email_bytes)
-                    server.quit()
-                    
-                    self.config.logger.info(f"✅ Email delivered to {rcpt_to} via {mx_server}")
-                    return True
-                    
-                except Exception as e:
-                    self.config.logger.warning(f"❌ Relay failed via {mx_server}: {str(e)[:60]}...")
-                    continue
+                # Try port 25 first, then 587 as fallback
+                for port in (25, 587):
+                    try:
+                        server = smtplib.SMTP(mx_server, port, timeout=20)
+                        server.set_debuglevel(0)
+
+                        # Use spoofed sender domain for EHLO (key for inbox delivery)
+                        server.ehlo(sender_domain)
+
+                        # Attempt STARTTLS (improves inbox placement at Gmail/Yahoo/Outlook)
+                        try:
+                            server.starttls()
+                            server.ehlo(sender_domain)
+                        except (smtplib.SMTPNotSupportedError, smtplib.SMTPException):
+                            pass  # Server doesn't support STARTTLS – continue without
+
+                        # Ensure proper encoding
+                        full_email = f"From: {mail_from}\r\nTo: {rcpt_to}\r\n{email_data}"
+                        full_email_bytes = full_email.encode('utf-8')
+                        server.sendmail(mail_from, [rcpt_to], full_email_bytes)
+                        server.quit()
+                        
+                        self.config.logger.info(f"✅ Email delivered to {rcpt_to} via {mx_server}:{port}")
+                        return True
+                        
+                    except Exception as e:
+                        self.config.logger.warning(f"❌ Relay failed via {mx_server}:{port}: {str(e)[:60]}...")
+                        continue
             
             self.config.logger.error(f"❌ All relay attempts failed for {rcpt_to}")
             return False
@@ -956,14 +969,17 @@ class EST:
         else:
             msg = MIMEMultipart('alternative')
 
-        # Standard headers
+        # Standard headers – comprehensive set for maximum deliverability
+        msg['MIME-Version'] = '1.0'
         msg['From'] = f"{from_name} <{from_email}>"
         msg['To'] = to_email
         msg['Subject'] = Header(subject, 'utf-8')
         msg['Date'] = formatdate(localtime=True)
         sender_domain = from_email.split('@')[1] if '@' in from_email else 'localhost'
         msg['Message-ID'] = email.utils.make_msgid(domain=sender_domain)
-        msg['X-Mailer'] = f"EST/{__version__}"
+        msg['Return-Path'] = f"<{from_email}>"
+        msg['X-Mailer'] = f"Microsoft Outlook 16.0"
+        msg['X-Originating-IP'] = '127.0.0.1'
 
         # Reply-To header
         if reply_to:
@@ -1934,7 +1950,7 @@ class EST:
 
         Uses the sender's domain for EHLO to improve deliverability against
         major providers (Gmail, Yahoo, Outlook, Comcast, etc.).
-        Tries each MX server in priority order.
+        Tries each MX server in priority order with port fallbacks and retries.
         """
         target_domain = to_email.split('@')[1]
         sender_domain = from_email.split('@')[1] if '@' in from_email else 'localhost'
@@ -1949,31 +1965,58 @@ class EST:
             f"via {len(mx_servers)} MX server(s)"
         )
 
+        # Try each MX server with multiple ports and retry backoff
         for mx_server in mx_servers:
-            try:
-                server = smtplib.SMTP(mx_server, 25, timeout=30)
-                server.ehlo(sender_domain)
+            for port in (25, 587):
+                for attempt in range(1, 4):  # Up to 3 attempts per port
+                    try:
+                        server = smtplib.SMTP(mx_server, port, timeout=30)
+                        server.ehlo(sender_domain)
 
-                # Try STARTTLS if available (improves deliverability)
-                try:
-                    server.starttls()
-                    server.ehlo(sender_domain)
-                except (smtplib.SMTPNotSupportedError, smtplib.SMTPException):
-                    pass  # Server doesn't support STARTTLS
+                        # Try STARTTLS if available (improves deliverability)
+                        try:
+                            server.starttls()
+                            server.ehlo(sender_domain)
+                        except (smtplib.SMTPNotSupportedError, smtplib.SMTPException):
+                            pass  # Server doesn't support STARTTLS
 
-                server.sendmail(from_email, [to_email], email_content)
-                server.quit()
+                        server.sendmail(from_email, [to_email], email_content)
+                        server.quit()
 
-                self.config.logger.info(
-                    f"✅ Direct delivery successful: {to_email} via {mx_server}"
-                )
-                return True
+                        self.config.logger.info(
+                            f"✅ Direct delivery successful: {to_email} via {mx_server}:{port}"
+                        )
+                        return True
 
-            except Exception as e:
-                self.config.logger.warning(
-                    f"❌ Direct delivery failed via {mx_server}: {str(e)[:80]}"
-                )
-                continue
+                    except smtplib.SMTPResponseException as e:
+                        # If server explicitly rejected (5xx), no point retrying same port
+                        if e.smtp_code >= 500 and e.smtp_code < 600:
+                            self.config.logger.warning(
+                                f"❌ Permanent rejection {mx_server}:{port}: "
+                                f"{e.smtp_code} {str(e.smtp_error)[:60]}"
+                            )
+                            break  # Skip retries for this port, try next
+                        # Temporary error (4xx) – retry after backoff
+                        backoff = 2 ** attempt
+                        self.config.logger.warning(
+                            f"⏳ Temporary error {mx_server}:{port} "
+                            f"(attempt {attempt}/3): {e.smtp_code}, retrying in {backoff}s..."
+                        )
+                        time.sleep(backoff)
+
+                    except (ConnectionRefusedError, OSError, socket.timeout) as e:
+                        self.config.logger.warning(
+                            f"❌ Connection failed {mx_server}:{port}: {str(e)[:60]}"
+                        )
+                        break  # Try next port or server
+
+                    except Exception as e:
+                        backoff = 2 ** attempt
+                        self.config.logger.warning(
+                            f"❌ Direct delivery attempt {attempt}/3 via {mx_server}:{port}: "
+                            f"{str(e)[:60]}, retrying in {backoff}s..."
+                        )
+                        time.sleep(backoff)
 
         self.config.logger.error(f"❌ All MX servers failed for {to_email}")
         return False
@@ -2121,6 +2164,11 @@ class EST:
             return default
         return value or default
 
+    @staticmethod
+    def _validate_email(addr: str) -> bool:
+        """Quick sanity check for an email address format."""
+        return bool(re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', addr))
+
     def _interactive_delivery_mode(self) -> Tuple[bool, bool]:
         """Ask user for delivery mode. Returns (direct_delivery, auto_server)."""
         print("\n   📡 Delivery Mode:")
@@ -2145,11 +2193,15 @@ class EST:
         if not target:
             print("   ❌ Target email required")
             return
+        first_addr = target.split(',')[0].strip()
+        if not self._validate_email(first_addr):
+            print(f"   ⚠️  '{first_addr}' may not be a valid email address")
 
         direct, auto = self._interactive_delivery_mode()
         reply_to = self._interactive_prompt("Reply-To address (optional)") or None
         att_path = self._interactive_prompt("Attachment file path (optional)") or None
         attachments = [att_path] if att_path else None
+        html_file = self._interactive_prompt("HTML body file (optional)") or None
 
         workers_str = self._interactive_prompt("Concurrent workers", "1")
         workers = int(workers_str) if workers_str.isdigit() else 1
@@ -2161,6 +2213,7 @@ class EST:
             auto_server=auto,
             reply_to=reply_to,
             attachments=attachments,
+            body_file=html_file,
             validate_dns=True,
             workers=workers,
         )
@@ -2169,21 +2222,48 @@ class EST:
         """Interactive custom spoofing test."""
         print("\n   ✏️  Custom Email Spoof Setup\n")
 
-        from_email = self._interactive_prompt("Spoofed sender email", required=True)
+        # Option to load from JSON template
+        template_path = self._interactive_prompt("JSON template file (optional, press Enter to skip)")
+        tpl_data: Optional[Dict] = None
+        if template_path and Path(template_path).is_file():
+            tpl_data = self._load_template(template_path)
+            if tpl_data:
+                print("   ✅ Template loaded – press Enter at any prompt to use template value")
+
+        from_email = self._interactive_prompt(
+            "Spoofed sender email",
+            default=tpl_data.get('from_email', '') if tpl_data else '',
+            required=True
+        )
         if not from_email:
             print("   ❌ Sender email required")
             return
-        from_name = self._interactive_prompt("Spoofed sender name", required=True)
+        if not self._validate_email(from_email):
+            print(f"   ⚠️  '{from_email}' may not be a valid email format")
+
+        from_name = self._interactive_prompt(
+            "Spoofed sender name",
+            default=tpl_data.get('from_name', '') if tpl_data else '',
+            required=True
+        )
         if not from_name:
             print("   ❌ Sender name required")
             return
-        subject = self._interactive_prompt("Email subject", required=True)
+        subject = self._interactive_prompt(
+            "Email subject",
+            default=tpl_data.get('subject', '') if tpl_data else '',
+            required=True
+        )
         if not subject:
             print("   ❌ Subject required")
             return
 
         print("   Enter email body text, or a file path to a text file:")
-        body_input = self._interactive_prompt("Body / file path", required=True)
+        body_input = self._interactive_prompt(
+            "Body / file path",
+            default=tpl_data.get('body', '') if tpl_data else '',
+            required=True
+        )
         body_text_file = None
         body = body_input
         if body_input and Path(body_input).is_file():
@@ -2194,11 +2274,18 @@ class EST:
         if not target:
             print("   ❌ Target email required")
             return
+        first_addr = target.split(',')[0].strip()
+        if not self._validate_email(first_addr):
+            print(f"   ⚠️  '{first_addr}' may not be a valid email address")
 
         direct, auto = self._interactive_delivery_mode()
         reply_to = self._interactive_prompt("Reply-To address (optional)") or None
         att_path = self._interactive_prompt("Attachment file path (optional)") or None
         attachments = [att_path] if att_path else None
+        html_file = self._interactive_prompt("HTML body file (optional)") or None
+
+        workers_str = self._interactive_prompt("Concurrent workers", "1")
+        workers = int(workers_str) if workers_str.isdigit() else 1
 
         self.run_custom_test(
             from_email=from_email,
@@ -2211,7 +2298,9 @@ class EST:
             reply_to=reply_to,
             attachments=attachments,
             body_text_file=body_text_file,
+            body_file=html_file,
             validate_dns=True,
+            workers=workers,
         )
 
     def _interactive_bulk(self):
